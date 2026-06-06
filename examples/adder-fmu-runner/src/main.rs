@@ -15,19 +15,23 @@
 //!   - `input_b(t) = 2.0 + 2.0 * t`
 //!   - `sum(t)     = input_a(t) + input_b(t)`
 //!
-//! ## WIT limitation workaround
+//! ## Lifecycle
 //!
-//! The `co-simulation-fmu` WIT world's `from-instance` function consumes the
-//! `common::instance` handle (owned transfer), so the host can no longer call
-//! `get-float64` / `set-float64` on the same handle after conversion.  Because
-//! the adder FMU is a purely algebraic, memoryless component, we work around
-//! this by instantiating the FMU fresh at each communication point:
+//! A single `co-simulation-instance` is created before the stepping loop,
+//! initialized once, and reused across all communication steps.  After the
+//! loop the instance is terminated and dropped.
 //!
-//! 1. Set inputs at time `t` on a fresh `instance`.
-//! 2. Read and assert the output via `get-float64`.
-//! 3. Wrap it with `from-instance` → `co-simulation-instance`.
-//! 4. Call `do-step` to exercise the co-simulation stepping mechanism.
-//! 5. Drop the `co-simulation-instance`; repeat.
+//! ```text
+//! cs = co-simulation-instance::instantiate-co-simulation(...)
+//! cs.enter-initialization-mode(...)
+//! cs.set-float64([0,1], [0.0, 2.0])   // initial inputs
+//! cs.exit-initialization-mode()
+//! for t in 0..n_steps:
+//!     cs.set-float64([0,1], [input_a(t), input_b(t)])
+//!     cs.do-step(t, h, false)
+//!     cs.get-float64([2])              // read and verify sum
+//! cs.terminate()
+//! ```
 //!
 //! ## Usage
 //!
@@ -158,129 +162,126 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow!("Failed to instantiate the co-simulation FMU component: {e}"))?;
 
     // ── Simulation parameters ──────────────────────────────────────────────
-    let step_size:   f64   = 0.1;
-    let n_steps:     usize = 50;          // 0 … 5.0 s
-    let tolerance:   f64   = 1e-10;       // floating-point comparison threshold
+    let step_size: f64   = 0.1;
+    let n_steps:   usize = 50;    // 0 … 5.0 s
+    let tolerance: f64   = 1e-10;
 
     println!(
         "Running adder-fmu from t=0.0 to t={:.1} s in {step_size} s steps …",
         n_steps as f64 * step_size
     );
 
+    // ── Create and initialise a single co-simulation instance ──────────────
+    let cs: ResourceAny = world
+        .fmi_fmi3_co_simulation()
+        .co_simulation_instance()
+        .call_instantiate_co_simulation(
+            &mut store,
+            "adder-1",  // instance name
+            "",         // instantiation token
+            "",         // resource path
+            false,      // visible
+            false,      // logging on
+            false,      // event mode used
+            false,      // early return allowed
+            &[],        // required intermediate variables
+        )?
+        .context("FMU instantiation returned None")?;
+
+    world
+        .fmi_fmi3_co_simulation()
+        .co_simulation_instance()
+        .call_enter_initialization_mode(&mut store, cs, None, 0.0, None)?;
+
+    // Set initial inputs (t = 0): input_a = 0.0, input_b = 2.0
+    world
+        .fmi_fmi3_co_simulation()
+        .co_simulation_instance()
+        .call_set_float64(&mut store, cs, &[VR_INPUT_A, VR_INPUT_B], &[0.0, 2.0])?;
+
+    world
+        .fmi_fmi3_co_simulation()
+        .co_simulation_instance()
+        .call_exit_initialization_mode(&mut store, cs)?;
+
     // ── Co-simulation loop ─────────────────────────────────────────────────
     //
-    // At each communication point `t = i * step_size`:
+    // For each interval [t, t + step_size):
     //
+    //   1) Set inputs for the interval start time t.
+    //   2) Call do-step(t, step_size, ...).
+    //   3) Read and verify output at t + step_size.
+    //
+    // Input profiles:
     //   input_a(t) = t               (start 0, slope 1 per second)
     //   input_b(t) = 2.0 + 2.0 * t  (start 2, slope 2 per second)
-    //   sum(t)     = input_a + input_b  (expected FMU output)
-    //
-    // A fresh FMU instance is created at every step so that `set-float64`
-    // and `get-float64` (both on `common::instance`) can be called before the
-    // instance is consumed by `from-instance` (see module-level doc comment).
-    for i in 0..=n_steps {
-        let t            = i as f64 * step_size;
-        let input_a      = t;
-        let input_b      = 2.0 + 2.0 * t;
-        let expected_sum = input_a + input_b;
+    //   sum(t)     = input_a + input_b
+    for i in 0..n_steps {
+        let t       = i as f64 * step_size;
+        let input_a = t;
+        let input_b = 2.0 + 2.0 * t;
 
-        // -- 1. Instantiate ---------------------------------------------------
-        let inst: ResourceAny = world
-            .fmi_fmi3_common()
-            .instance()
-            .call_instantiate_co_simulation(
-                &mut store,
-                "adder-1",   // instance name
-                "",          // instantiation token
-                "",          // resource path
-                false,       // visible
-                false,       // logging on
-                false,       // event mode used
-                false,       // early return allowed
-                &[],         // required intermediate variables
-            )?
-            .with_context(|| format!("FMU instantiation returned None at step {i}"))?;
-
-        // -- 2. Initialization mode ------------------------------------------
+        // -- 1. Update inputs ------------------------------------------------
         world
-            .fmi_fmi3_common()
-            .instance()
-            .call_enter_initialization_mode(&mut store, inst, None, t, None)?;
-
-        // -- 3. Set inputs at current time point -----------------------------
-        world
-            .fmi_fmi3_common()
-            .instance()
+            .fmi_fmi3_co_simulation()
+            .co_simulation_instance()
             .call_set_float64(
                 &mut store,
-                inst,
+                cs,
                 &[VR_INPUT_A, VR_INPUT_B],
                 &[input_a, input_b],
             )?;
 
-        // -- 4. Exit initialization mode -------------------------------------
-        world
-            .fmi_fmi3_common()
-            .instance()
-            .call_exit_initialization_mode(&mut store, inst)?;
+        // -- 2. Advance time by one step -------------------------------------
+        let do_step_result = world
+            .fmi_fmi3_co_simulation()
+            .co_simulation_instance()
+            .call_do_step(&mut store, cs, t, step_size, false)?;
 
-        // -- 5. Read and verify output ---------------------------------------
+        let r = match do_step_result {
+            Ok(r)  => r,
+            Err(s) => bail!("do-step failed at step {i} (t={t:.1}) with status {s:?}"),
+        };
+
+        assert!(
+            !r.terminate_simulation,
+            "do-step at step {i} (t={t:.1}) unexpectedly requested termination",
+        );
+        assert!(
+            !r.early_return,
+            "do-step at step {i} (t={t:.1}) had unexpected early return",
+        );
+        let t_next = t + step_size;
+        let lst = r.last_successful_time;
+        assert!(
+            (lst - t_next).abs() < tolerance,
+            "do-step at step {i} (t={t:.1}): last_successful_time={lst} but expected {t_next}",
+        );
+
+        // -- 3. Read and verify output at the new communication point --------
+        let expected_sum = input_a + input_b;
         let get_result = world
-            .fmi_fmi3_common()
-            .instance()
-            .call_get_float64(&mut store, inst, &[VR_SUM])?;
+            .fmi_fmi3_co_simulation()
+            .co_simulation_instance()
+            .call_get_float64(&mut store, cs, &[VR_SUM])?;
 
         let values = match get_result {
             Ok(v)  => v,
-            Err(s) => bail!("get-float64 failed at step {i} (t={t:.1}) with status {s:?}"),
+            Err(s) => bail!("get-float64 failed at step {i} (t={t_next:.1}) with status {s:?}"),
         };
 
         let got = values[0];
         assert!(
             (got - expected_sum).abs() < tolerance,
-            "step {i} (t={t:.1}): output sum = {got} but expected {expected_sum} \
-             (input_a={input_a}, input_b={input_b})",
+            "step {i} (t={t_next:.1}): output sum = {got} but expected {expected_sum}",
         );
-
-        // -- 6. Wrap into co-simulation-instance (consumes `inst`) ----------
-        //
-        // `from-instance` takes ownership of the `instance` handle; after this
-        // call we can no longer use `inst`.
-        let cs: ResourceAny = world
-            .fmi_fmi3_co_simulation()
-            .co_simulation_instance()
-            .call_from_instance(&mut store, inst)?;
-
-        // -- 7. Advance time by one step (not at the final point) ------------
-        if i < n_steps {
-            let do_step_result = world
-                .fmi_fmi3_co_simulation()
-                .co_simulation_instance()
-                .call_do_step(&mut store, cs, t, step_size, false)?;
-
-            let r = match do_step_result {
-                Ok(r)  => r,
-                Err(s) => bail!("do-step failed at step {i} (t={t:.1}) with status {s:?}"),
-            };
-
-            assert!(
-                !r.terminate_simulation,
-                "do-step at step {i} (t={t:.1}) unexpectedly requested termination",
-            );
-            assert!(
-                !r.early_return,
-                "do-step at step {i} (t={t:.1}) had unexpected early return",
-            );
-            let lst = r.last_successful_time;
-            let expected_lst = t + step_size;
-            assert!(
-                (lst - expected_lst).abs() < tolerance,
-                "do-step at step {i} (t={t:.1}): last_successful_time={lst} but expected {expected_lst}",
-            );
-        }
-
-        // `cs` is dropped here, releasing the component resource handle.
     }
+
+    // ── Terminate the instance ─────────────────────────────────────────────
+    world
+        .fmi_fmi3_co_simulation()
+        .co_simulation_instance()
+        .call_terminate(&mut store, cs)?;
 
     println!(
         "OK — all {n_steps} steps passed: \
