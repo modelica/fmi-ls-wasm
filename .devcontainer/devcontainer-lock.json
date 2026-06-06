@@ -1,0 +1,14 @@
+{
+  "features": {
+    "devwasm.azurecr.io/dev-wasm/dev-wasm-feature/wasmtime-wasi:0": {
+      "version": "0.0.16",
+      "resolved": "devwasm.azurecr.io/dev-wasm/dev-wasm-feature/wasmtime-wasi@sha256:ae4e7382b6ee0897d71d8d748152301e3898dd8cf2bd6d4228b3ebfb59414f87",
+      "integrity": "sha256:ae4e7382b6ee0897d71d8d748152301e3898dd8cf2bd6d4228b3ebfb59414f87"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.5.0",
+      "resolved": "ghcr.io/devcontainers/features/rust@sha256:0c55e65f2e3df736e478f26ee4d5ed41bae6b54dac1318c443e31444c8ed283c",
+      "integrity": "sha256:0c55e65f2e3df736e478f26ee4d5ed41bae6b54dac1318c443e31444c8ed283c"
+    }
+  }
+}
