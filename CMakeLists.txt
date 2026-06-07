@@ -406,6 +406,40 @@ if(WIT_BINDGEN_EXECUTABLE)
 
     add_custom_target(adder-c-fmu DEPENDS adder-c-fmu-wasm)
 
+    # -----------------------------------------------------------------------
+    # Compile the C FMU to a native x86_64-linux shared library
+    #
+    # The same source file is used with the native toolchain (not the WASI SDK)
+    # and without any WIT-bindgen headers; __wasm__ is not defined, so the
+    # #else branch in adder-c-fmu.c activates the standard FMI 3.0 C API.
+    # -----------------------------------------------------------------------
+    set(ADDER_C_FMU_NATIVE_SO "${CMAKE_BINARY_DIR}/adder_c_fmu.so")
+
+    add_custom_command(
+        OUTPUT "${ADDER_C_FMU_NATIVE_SO}"
+        COMMAND cc -std=c11 -O2 -Wall -Wextra -shared -fPIC
+                "${ADDER_C_FMU_DIR}/adder-c-fmu.c"
+                -o "${ADDER_C_FMU_NATIVE_SO}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        DEPENDS "${ADDER_C_FMU_DIR}/adder-c-fmu.c"
+        COMMENT "Building adder-c-fmu native shared library (x86_64-linux)..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-c-fmu-native
+        DEPENDS "${ADDER_C_FMU_NATIVE_SO}"
+    )
+
+    add_test(
+        NAME adder-c-fmu-native-symbols
+        COMMAND /bin/sh -c
+            "nm -D '${ADDER_C_FMU_NATIVE_SO}' | grep -q ' T fmi3InstantiateCoSimulation'"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(adder-c-fmu-native-symbols
+        PROPERTIES DEPENDS adder-c-fmu-wasm-validation
+    )
+
     # Validate the compiled component against the WIT package.
     add_custom_target(validate-adder-c-fmu
         COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
@@ -436,19 +470,25 @@ if(WIT_BINDGEN_EXECUTABLE)
         OUTPUT "${ADDER_C_FMU_ARCHIVE}"
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_C_FMU_STAGING}"
         COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2"
+            "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${ADDER_C_FMU_STAGING}/binaries/x86_64-linux"
         COMMAND ${CMAKE_COMMAND} -E copy
                 "${ADDER_C_FMU_MODEL_DESC}"
                 "${ADDER_C_FMU_STAGING}/modelDescription.xml"
         COMMAND ${CMAKE_COMMAND} -E copy
                 "${ADDER_C_FMU_WASM}"
                 "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2/adder_c_fmu.wasm"
+        COMMAND ${CMAKE_COMMAND} -E copy
+            "${ADDER_C_FMU_NATIVE_SO}"
+            "${ADDER_C_FMU_STAGING}/binaries/x86_64-linux/adder_c_fmu.so"
         COMMAND ${CMAKE_COMMAND} -E chdir "${ADDER_C_FMU_STAGING}"
                 ${CMAKE_COMMAND} -E tar cf "${ADDER_C_FMU_ARCHIVE}" --format=zip
                 -- modelDescription.xml binaries
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         DEPENDS
             adder-c-fmu-wasm
+            "${ADDER_C_FMU_NATIVE_SO}"
             "${ADDER_C_FMU_MODEL_DESC}"
         COMMENT "Packaging adder-c-fmu FMU archive (adder-c-fmu.fmu)..."
         VERBATIM
