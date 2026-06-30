@@ -2,6 +2,9 @@
 
 [![Build](https://github.com/PMSFIT/fmi3-wasm/actions/workflows/build.yml/badge.svg)](https://github.com/PMSFIT/fmi3-wasm/actions/workflows/build.yml)
 
+_Note that this repository contains working drafts for what might become an fmi-ls-wasm layered standard for a webassembly-based portable binary platform for FMI.
+Everything is unofficial and subject to change prior to any official release._
+
 WIT definitions that map the [FMI 3.0](https://svn.modelica.org/fmi/branches/public/specifications/v3.0/) C API to the [WebAssembly Component Model](https://component-model.bytecodealliance.org/) interface description language (WIT).
 
 Also included are examples show-casing the WIT definitions, using Rust,
