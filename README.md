@@ -1,6 +1,6 @@
 # FMI 3.0 → WebAssembly Component Model Mapping
 
-[![Build](https://github.com/PMSFIT/fmi3-wasm/actions/workflows/build.yml/badge.svg)](https://github.com/PMSFIT/fmi3-wasm/actions/workflows/build.yml)
+[![Build](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build.yml/badge.svg)](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build.yml)
 
 _Note that this repository contains working drafts for what might become an fmi-ls-wasm layered standard for a webassembly-based portable binary platform for FMI.
 Everything is unofficial and subject to change prior to any official release._
