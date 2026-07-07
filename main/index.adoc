@@ -1,0 +1,429 @@
+= FMI Layered Standard for WebAssembly (FMI-LS-WASM)
+:sectnums:
+:sectnumlevels: 5
+:toc: left
+:toc-title: Contents
+:toclevels: 5
+:idprefix:
+:idseparator: -
+:xrefstyle: short
+:docinfo: shared
+:docinfodir: theme/docinfo
+:stem: latexmath
+:source-highlighter: highlightjs
+:highlightjs-theme: github
+:nofooter:
+:icons: font
+:website-url: https://fmi-standard.org/
+:repo-url: https://github.com/modelica/fmi-ls-wasm
+:logo: FMI
+
+////
+Copyright 2026 The Modelica Association Project FMI
+
+This document is provided "as is" without any warranty.
+It is licensed under the 2-Clause BSD License (see LICENSE.txt).
+////
+
+{empty} +
+
+[IMPORTANT]
+====
+This document is a *working draft* for what might become the FMI Layered Standard for WebAssembly (FMI-LS-WASM).
+Everything is *unofficial and subject to change* prior to any official release.
+Feedback is welcome via the https://github.com/modelica/fmi-ls-wasm[GitHub repository].
+====
+
+This layered standard defines a portable, binary target platform for https://svn.modelica.org/fmi/branches/public/specifications/v3.0/[FMI 3.0] Functional Mock-up Units (FMUs) using https://component-model.bytecodealliance.org/[WebAssembly Component Model] components.
+It specifies the WIT interface mapping from the FMI 3.0 C API, the FMU archive layout, and the runtime conventions that hosts and FMUs must follow.
+
+== Introduction
+
+=== Intent of This Document
+
+The Functional Mock-up Interface (FMI) standard defines a C API for exchanging simulation models.
+Current FMU binaries are native shared or static libraries bound to a specific operating system and CPU architecture.
+This limits portability: an FMU compiled for `linux-x86_64` cannot run on `win64`, macOS, or embedded targets without recompilation or emulation.
+Alternatively (or additionaly) FMUs can include C source code, however that leads to the usual portability problems of C source, as well as restrictions in terms of IP protection and ease of use.
+
+Neither of those options lead to any simple ability to sandbox the execution of the FMU, as native code execution (within the same process as the host) is not easily sandboxed.
+While this approach can produce the best results in terms of execution speed, sometimes the concerns of portability, or security (e.g. via sandboxing of untrusted code) are of more concern.
+
+The WebAssembly Component Model provides a portable, sandboxed binary format with a well-defined interface description language (WIT) that can be executed by any conforming WebAssembly runtime.
+By mapping FMI 3.0 to the Component Model, FMUs become:
+
+* *Portable* — one binary runs on any platform with a conforming WebAssembly runtime.
+* *Sandboxed* — the FMU can only access resources explicitly granted by the host through the Component Model's capability model.
+* *Interoperable* — component toolchains in any language (Rust, C, Python, …) can produce or consume conforming FMUs.
+
+This layered standard does not change the FMI 3.0 model description XML, the state machine, or the semantics of the simulation protocol.
+It specifies only the binary interface and packaging.
+
+It does this by defining an additional binary target for FMUs, which can be used in conjunction with existing native binary targes and/or source code, or stand-alone, allowing for flexible use of the different targets within one FMU.
+
+=== How to Read This Document
+
+Readers should be familiar with:
+
+* https://svn.modelica.org/fmi/branches/public/specifications/v3.0/[FMI 3.0 Specification]
+* https://component-model.bytecodealliance.org/[WebAssembly Component Model]
+* https://component-model.bytecodealliance.org/design/wit.html[WIT — WebAssembly Interface Types]
+
+The normative WIT files are the canonical interface definitions.
+Prose in this document explains the mapping rationale and conformance rules.
+Where prose and WIT differ, the WIT files take precedence.
+
+=== Normative Language
+
+The key words *MUST*, *MUST NOT*, *REQUIRED*, *SHALL*, *SHALL NOT*, *SHOULD*, *SHOULD NOT*, *RECOMMENDED*, *MAY*, and *OPTIONAL* in this document are to be interpreted as described in https://www.rfc-editor.org/rfc/rfc2119[RFC 2119].
+
+== Scope
+
+This layered standard applies to FMI 3.0 compliant FMUs that are distributed as WebAssembly Component Model components.
+It covers:
+
+* The WIT interface package `fmi:fmi3@3.0.0`, including all types, callback interfaces, functional interfaces, and world definitions.
+* The FMU archive layout for wasm-based FMUs.
+* The conformance rules for FMU implementors and for simulation environment (importer) implementors.
+
+The following are *out of scope*:
+
+* The FMI 3.0 model description XML format (`modelDescription.xml`) — unchanged from the base standard.
+* The FMI 3.0 simulation state machine — unchanged from the base standard.
+* WebAssembly runtime selection or configuration.
+* WASI interfaces beyond those explicitly referenced.
+
+== Overview of the WebAssembly Component Model
+
+The https://component-model.bytecodealliance.org/[WebAssembly Component Model] is a specification that adds a higher-level interface layer on top of core WebAssembly modules.
+Its key elements relevant to this layered standard are:
+
+WIT (WebAssembly Interface Types)::
+  A language-neutral interface description language used to define the types and functions that a component exports (provides) or imports (requires).
+
+Component::
+  A self-describing WebAssembly binary that encodes its WIT interfaces, dependencies, and exports.
+  A component is the binary artefact distributed inside the FMU archive.
+
+World::
+  A WIT construct that lists the complete set of imports and exports for a component.
+  Each FMU kind (Model Exchange, Co-Simulation, Scheduled Execution) has its own world definition.
+
+Resource::
+  A WIT type representing an owned, opaque handle with associated methods.
+  Each FMU instance kind is modelled as a resource, ensuring type-safe, lifecycle-managed handles.
+
+== FMU Archive Format
+
+An FMI-LS-WASM compliant FMU is a standard FMI 3.0 FMU archive (a ZIP file with the `.fmu` extension) with the following minimal layout:
+
+[source]
+----
+<modelName>.fmu  (ZIP archive)
+├── modelDescription.xml         (FMI 3.0 model description — required)
+├── extra/
+│   └── org.modelica.fmi-ls-wasm/
+│       └── manifest.xml         (layered standard manifest — required)
+└── binaries/
+    └── wasm32-wasip2/
+        └── <modelIdentifier>.wasm   (WebAssembly component — required)
+----
+
+=== `modelDescription.xml`
+
+The model description file is identical to the FMI 3.0 specification.
+The `<CoSimulation>`, `<ModelExchange>`, or `<ScheduledExecution>` element's `modelIdentifier` attribute provides the stem of the `.wasm` filename (i.e., `<modelIdentifier>.wasm`).
+
+=== The WebAssembly Component
+
+The `.wasm` file MUST be a valid WebAssembly Component Model component.
+It MUST implement the world corresponding to its FMU type:
+
+[cols="1,2",options="header"]
+|===
+| FMU type | Required WIT world
+| Model Exchange | `fmi:fmi3/world.model-exchange-fmu`
+| Co-Simulation | `fmi:fmi3/world.co-simulation-fmu`
+| Scheduled Execution | `fmi:fmi3/world.scheduled-execution-fmu`
+|===
+
+The component MUST export all interfaces listed as `export` in its world and MUST be able to satisfy all interfaces listed as `import` from its host.
+
+=== Platform Directory
+
+The platform directory for wasm-based FMUs is `binaries/wasm32-wasip2/`.
+This follows the WASI Preview 2 target triple (`wasm32-wasip2`) used by the Bytecode Alliance toolchain ecosystem.
+
+An FMU MAY include both a wasm component and native binaries for other platforms in the same archive.
+Importers are free to prefer either native binaries or the wasm component when a conforming runtime is available.
+
+=== Layered Standard Manifest
+
+The `extra/org.modelica.fmi-ls-wasm/manifest.xml` file MUST be present and MUST conform to the FMI 3.0 layered standard manifest schema with:
+
+* `fmi-ls-name` = `"org.modelica.fmi-ls-wasm"`
+* `fmi-ls-version` = a semantic version string (e.g. `"0.1.0"`)
+* `fmi-ls-description` = `"FMI Layered Standard for WebAssembly"`
+
+== WIT Package Definition
+
+All WIT definitions in this layered standard belong to the package:
+
+[source,wit]
+----
+package fmi:fmi3@3.0.0;
+----
+
+The package name `fmi` and namespace `fmi3` reflect the FMI standard family.
+The version `3.0.0` denotes compatibility with FMI 3.0.
+
+=== Type Definitions
+
+All shared types are defined in the `types` interface.
+
+[source,wit]
+----
+include::../wit/fmi3-types.wit[]
+----
+
+==== Type Mapping from FMI 3.0 C Types
+
+[cols="1,1,2",options="header"]
+|===
+| FMI 3.0 C type | WIT type | Notes
+| `fmi3ValueReference` | `u32` | Direct alias
+| `fmi3Float64` | `f64` | IEEE 754 double
+| `fmi3Float32` | `f32` | IEEE 754 single
+| `fmi3Int8` | `s8` | Signed 8-bit integer
+| `fmi3Int16` | `s16` | Signed 16-bit integer
+| `fmi3Int32` | `s32` | Signed 32-bit integer
+| `fmi3Int64` | `s64` | Signed 64-bit integer
+| `fmi3UInt8` | `u8` | Unsigned 8-bit integer
+| `fmi3UInt16` | `u16` | Unsigned 16-bit integer
+| `fmi3UInt32` | `u32` | Unsigned 32-bit integer
+| `fmi3UInt64` | `u64` | Unsigned 64-bit integer
+| `fmi3Boolean` | `bool` | C `int`-sized → WIT 1-byte `bool`
+| `fmi3String` | `string` | Null-terminator elided; length-prefixed UTF-8
+| `fmi3Binary` | `list<u8>` | Length-prefixed blob; size array removed
+| `fmi3Clock` | `bool` | `true` = tick
+| `fmi3FMUState` | `list<u8>` | Serialised immediately (see <<design-fmustate>>)
+| `fmi3Instance` | resource (see <<fmi-instance-resources>>) | One resource per interface kind
+| `fmi3Status` | `enum status` | Five variants
+| `fmi3IntervalQualifier` | `enum interval-qualifier` | Three variants
+| `fmi3DependencyKind` | `enum dependency-kind` | Five variants
+| Callback function pointer | imported `interface callbacks` | Host-supplied
+|===
+
+=== Callback Interfaces
+
+Callbacks that the FMU calls back into the host are modelled as *imported* WIT interfaces.
+The `fmi3InstanceEnvironment` opaque pointer is eliminated entirely; the Component Model's closure semantics handle per-instance context automatically.
+
+[source,wit]
+----
+include::../wit/fmi3-callbacks.wit[]
+----
+
+The `callbacks` interface provides the four callbacks used across all FMU types.
+The `intermediate-update-callbacks` interface is separated so that simple Co-Simulation FMUs that do not support early return do not need to implement it.
+
+=== Common Interface
+
+[source,wit]
+----
+include::../wit/fmi3-common.wit[]
+----
+
+The `common` interface contains only `get-version`, which is the one FMI 3.0 function that is not a method on an instance.
+All other common operations (variable getters/setters, lifecycle, state save/restore) are methods on the typed instance resources defined in each interface kind.
+
+=== Model Exchange Interface
+
+[source,wit]
+----
+include::../wit/fmi3-model-exchange.wit[]
+----
+
+=== Co-Simulation Interface
+
+[source,wit]
+----
+include::../wit/fmi3-co-simulation.wit[]
+----
+
+=== Scheduled Execution Interface
+
+[source,wit]
+----
+include::../wit/fmi3-scheduled-execution.wit[]
+----
+
+=== World Definitions
+
+A WIT world specifies the complete contract for a component: which interfaces it imports (uses from the host) and which it exports (provides to the host).
+
+[source,wit]
+----
+include::../wit/world.wit[]
+----
+
+[cols="1,2,2",options="header"]
+|===
+| World | Exports (FMU provides) | Imports (host provides)
+| `model-exchange-fmu` | `common`, `model-exchange` | `callbacks`
+| `co-simulation-fmu` | `common`, `co-simulation` | `callbacks`, `intermediate-update-callbacks` (optional)
+| `scheduled-execution-fmu` | `common`, `scheduled-execution` | `callbacks`
+| `master-algorithm` | `callbacks`, `intermediate-update-callbacks` | `common`, `model-exchange`, `co-simulation`, `scheduled-execution`
+|===
+
+== Design Decisions
+
+This section documents the rationale for the mapping choices made in the WIT definitions.
+
+[#fmi-instance-resources]
+=== `fmi3Instance` → Three Standalone Resources
+
+The opaque C pointer `fmi3Instance` is mapped to three distinct WIT resources — one per interface kind:
+
+[cols="1,1,1",options="header"]
+|===
+| FMU kind | WIT resource | Static factory
+| Model Exchange | `model-exchange-instance` | `instantiate-model-exchange`
+| Co-Simulation | `co-simulation-instance` | `instantiate-co-simulation`
+| Scheduled Execution | `scheduled-execution-instance` | `instantiate-scheduled-execution`
+|===
+
+Each resource owns the full lifecycle of the FMU instance: it carries the instantiation factory as a static method, all common lifecycle and variable access methods (`enter-initialization-mode`, `get-float64`, `set-fmu-state`, etc.), and the interface-kind-specific methods (`do-step`, `set-time`, …).
+
+Resource ownership is *linear*: `fmi3FreeInstance` is called when the resource is dropped, so no explicit free binding is needed.
+
+This design means the host never holds an intermediate handle shared across interface kinds, making it impossible to call ME-only methods (e.g. `set-time`) on a CS handle.
+
+=== Callback Pointers → Imported Interfaces
+
+FMI 3.0 passes callbacks as function pointers to `fmi3Instantiate*`.
+In the Component Model these become *imported* interfaces supplied by the host world.
+The `fmi3InstanceEnvironment` opaque pointer is dropped entirely; the Component Model's closure semantics handle per-instance context automatically.
+
+=== `intermediateUpdateCallback` is Optional
+
+The `intermediate-update-callbacks` interface is a separate import so that simple CS FMUs that do not support early return can omit it.
+This is permitted by the WIT world definition for `co-simulation-fmu`, which marks that import without making it mandatory at the component level.
+
+=== Parallel C Arrays → `list<T>` / `list<tuple<…>>`
+
+FMI getter/setter functions use parallel C arrays (pointer + `size_t` length).
+These map to `list<T>` in WIT.
+Where two arrays are logically paired (e.g. `vrs[]` + `orders[]` for output derivatives), they are collapsed into `list<tuple<value-reference, u32>>` to prevent length mismatches.
+
+[cols="1,1",options="header"]
+|===
+| FMI 3.0 C signature | WIT mapping
+| `fmi3GetFloat64(instance, vrs[], nVRs, values[], nValues)` | `get-float64(value-references: list<value-reference>) -> result<list<f64>, status>`
+| `fmi3GetOutputDerivatives(instance, vrs[], nVRs, orders[], nOrders, values[], nValues)` | `get-output-derivatives(requests: list<tuple<value-reference, u32>>) -> result<list<f64>, status>`
+|===
+
+=== Optional Parameters → `option<T>`
+
+`fmi3EnterInitializationMode` takes a `toleranceDefined` boolean alongside `tolerance`, and similarly for `stopTimeDefined` / `stopTime`.
+These pairs collapse to `option<f64>` in WIT, which is both more idiomatic and eliminates the possibility of passing `toleranceDefined = false` with a non-zero `tolerance`.
+
+[cols="1,1",options="header"]
+|===
+| FMI 3.0 C parameters | WIT parameter
+| `fmi3Boolean toleranceDefined, fmi3Float64 tolerance` | `tolerance: option<f64>`
+| `fmi3Boolean stopTimeDefined, fmi3Float64 stopTime` | `stop-time: option<f64>`
+|===
+
+=== Output Parameters → Return Values / Records
+
+Functions with multiple C out-parameters (e.g. `fmi3UpdateDiscreteStates`, `fmi3DoStep`, `fmi3CompletedIntegratorStep`) return a record instead of multiple pointer arguments.
+This is idiomatic for WIT and eliminates null-pointer risks.
+
+[cols="1,1",options="header"]
+|===
+| FMI 3.0 C output parameters | WIT return type
+| `fmi3Boolean* newDiscreteStatesNeeded, fmi3Boolean* terminateSimulation, …` | `result<discrete-states-info, status>`
+| `fmi3Boolean* eventHandlingNeeded, fmi3Boolean* terminateSimulation, fmi3Boolean* earlyReturn, fmi3Float64* lastSuccessfulTime` | `result<do-step-result, status>`
+| `fmi3Boolean* enterEventMode, fmi3Boolean* terminateSimulation` | `result<completed-step-result, status>`
+|===
+
+[#design-fmustate]
+=== `fmi3FMUState` → `list<u8>`
+
+The C API uses a two-phase serialise approach (`fmi3GetFMUState` + `fmi3SerializeFMUState`).
+The WIT mapping merges these into a single `get-fmu-state` that returns `list<u8>` (serialised bytes immediately).
+The host therefore never holds an un-serialised `fmi3FMUState` handle.
+
+The corresponding restore operation (`fmi3SetFMUState` + `fmi3DeserializeFMUState`) is similarly merged into `set-fmu-state(state: fmu-state)`.
+
+=== `fmi3Boolean` → `bool`
+
+FMI 3.0 defines `fmi3Boolean` as `int`-sized (for C ABI compatibility).
+The Component Model uses a native 1-byte `bool`, which is correct for WIT and avoids ABI fragility.
+
+=== `fmi3String` → `string`
+
+FMI strings are null-terminated UTF-8.
+WIT `string` is length-prefixed UTF-8; the null terminator is elided.
+No semantic change is introduced; implementations MUST ensure the content is valid UTF-8.
+
+=== `fmi3Binary` → `list<u8>`
+
+Binary variables carry an explicit length in C (`valueSizes[]`).
+In WIT each blob is a `list<u8>` whose length is intrinsic, so the size array is removed.
+For `fmi3GetBinary` / `fmi3SetBinary` dealing with multiple variables the type becomes `list<list<u8>>`.
+
+== Conformance
+
+=== FMU Implementors
+
+An FMU is conformant with this layered standard if it:
+
+. Provides a WebAssembly component binary at `binaries/wasm32-wasip2/<modelIdentifier>.wasm`.
+. The component implements the WIT world corresponding to its FMU type as defined in <<world-definitions>>.
+. Includes a valid `modelDescription.xml` conformant with FMI 3.0.
+. Includes a valid `extra/org.modelica.fmi-ls-wasm/manifest.xml`.
+. Implements the semantics of all exported interface methods as specified by the FMI 3.0 standard.
+
+=== Simulation Environment (Importer) Implementors
+
+An importer is conformant if it:
+
+. Can load and instantiate WebAssembly components conforming to `wasm32-wasip2` target.
+. Provides all imported interfaces declared in the FMU's world (callbacks, and `intermediate-update-callbacks` when `early-return-allowed = true`).
+. Honours the FMI 3.0 state machine when calling methods on the instance resource.
+. Drops the instance resource (triggering `fmi3FreeInstance`) when the simulation is complete or aborted.
+
+== Known Limitations and Future Work
+
+. *`fmi3GetVersion` is a free function* — it is the only item in the `common` interface, exposed at the interface level rather than as a resource method, matching the C API.
+
+. *Model description XML* — FMI 3.0 ships metadata as `modelDescription.xml` inside the FMU archive.
+  This mapping covers only the runtime API; the static metadata is out of scope.
+
+. *Threading model for Scheduled Execution* — The preemption lock/unlock callbacks are mapped as host-imported functions, but the Component Model threading extensions (WASI threads or `shared-everything-threads`) are still evolving.
+  Platform integrators may need to adapt when those proposals stabilise.
+
+. *`fmi3Char`* — Used only in `fmi3GetVersion` return value; mapped to `string`.
+
+. *Serialise/deserialise split* — If round-tripping large state blobs proves expensive, the two-phase C API (`GetFMUState` + `SerializeFMUState`) can be re-exposed as separate WIT functions without changing the type mapping.
+
+. *WASI imports* — FMUs that need filesystem or clock access will depend on WASI interfaces.
+  These dependencies are not yet specified by this layered standard and are left to the FMU implementor.
+
+[bibliography]
+== References
+
+* [[[FMI30,1]]] Modelica Association Project FMI: _Functional Mock-up Interface Specification_, Version 3.0. https://svn.modelica.org/fmi/branches/public/specifications/v3.0/
+
+* [[[WASM-CM,2]]] Bytecode Alliance: _WebAssembly Component Model_. https://component-model.bytecodealliance.org/
+
+* [[[WIT,3]]] Bytecode Alliance: _WIT — WebAssembly Interface Types_. https://component-model.bytecodealliance.org/design/wit.html
+
+* [[[RFC2119,4]]] Bradner, S.: _Key words for use in RFCs to Indicate Requirement Levels_. RFC 2119, March 1997. https://www.rfc-editor.org/rfc/rfc2119
+
+* [[[WASI-P2,5]]] Bytecode Alliance: _WASI Preview 2_. https://github.com/WebAssembly/WASI/blob/main/preview2/README.md
+
+* [[[LICENSE,6]]] 2-Clause BSD License. https://opensource.org/licenses/BSD-2-Clause
+
