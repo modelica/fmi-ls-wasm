@@ -1,0 +1,60 @@
+name: Build Specification
+
+on:
+  push:
+    branches-ignore: [ 'temp/*' ]
+    tags: ['*']
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-spec:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Generate revnumber
+      run: |
+        [[ $GITHUB_REF_TYPE == "tag" ]] && REVNUMBER=${GITHUB_REF:11} || REVNUMBER=${GITHUB_SHA:0:7}
+        echo "REVNUMBER=$REVNUMBER" >> $GITHUB_ENV
+
+    - name: Generate HTML
+      uses: avattathil/asciidoctor-action@master
+      with:
+        program: asciidoctor --attribute=revnumber=${{ env.REVNUMBER }} --attribute=revdate=$(date +%F) docs/index.adoc
+
+    - name: Copy license
+      run: cp LICENSE.txt docs
+
+    - name: Copy wit files
+      run: cp -r wit docs/
+
+    - name: Create ZIP archive
+      uses: actions/upload-artifact@v7
+      with:
+        name: FMI-LS-WASM-spec
+        path: |
+          docs/index.html
+          docs/LICENSE.txt
+          docs/wit/*
+          docs/theme/css/*.css
+          docs/theme/images/*.svg
+          docs/theme/js/*.js
+        if-no-files-found: error
+
+    - name: Extract branch name
+      id: extract_branch
+      shell: bash
+      run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >> $GITHUB_OUTPUT
+
+    - name: Deploy to GitHub Pages
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: docs
+        destination_dir: ${{ steps.extract_branch.outputs.branch }}

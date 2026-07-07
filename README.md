@@ -1,14 +1,28 @@
-# FMI 3.0 → WebAssembly Component Model Mapping
+# FMI Layered Standard WebAssembly (FMI-LS-WASM)
 
-[![Build](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build.yml/badge.svg)](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build.yml)
+[![Build Specification](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build-spec.yml/badge.svg)](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build-spec.yml)
+[![Build Examples](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build-examples.yml/badge.svg)](https://github.com/modelica/fmi-ls-wasm/actions/workflows/build-examples.yml)
 
-_Note that this repository contains working drafts for what might become an fmi-ls-wasm layered standard for a webassembly-based portable binary platform for FMI.
-Everything is unofficial and subject to change prior to any official release._
+This repository contains a current prototype draft for the FMI Layered
+Standard WebAssembly (fmi-ls-wasm) based on the [Functional Mock-up Interface][FMI]
+3.0 standard for the exchange of simulation models.
+It presents a mapping of the [FMI 3.0][FMI3] C API to the [WebAssembly Component Model](https://component-model.bytecodealliance.org/) interface description language (WIT).
 
-WIT definitions that map the [FMI 3.0](https://svn.modelica.org/fmi/branches/public/specifications/v3.0/) C API to the [WebAssembly Component Model](https://component-model.bytecodealliance.org/) interface description language (WIT).
+Note that this draft is being worked on actively, and thus is subject to change without notice.
 
-Also included are examples show-casing the WIT definitions, using Rust,
-C and WAT implementations.
+This is currently not normative, nor is this document to be considered
+officially endorsed by the Modelica Association or other involved
+organisations prior to official adoption.
+
+The [FMI 3.0 Layered Standard WebAssembly][spec] is currently maintained on
+[GitHub][githubspec] and is published [here][spec]. It is based on
+the [FMI][] standard.
+
+Also included are examples show-casing the WIT definitions, using Rust, C and WAT implementations.
+
+[FMI]: https://fmi-standard.org/
+[githubspec]: docs/index.adoc
+[spec]: https://modelica.github.io/fmi-ls-wasm/main/
 
 ## File layout
 

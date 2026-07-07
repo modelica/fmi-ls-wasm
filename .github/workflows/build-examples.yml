@@ -1,4 +1,4 @@
-name: Build
+name: Build Examples
 
 on:
   push:
@@ -38,13 +38,13 @@ jobs:
       - name: Upload FMU artefacts
         uses: actions/upload-artifact@v7
         with:
-          name: fmus
+          name: FMI-LS-WASM-example-fmus
           path: build/*.fmu
 
       - name: Upload runner binary artefacts
         uses: actions/upload-artifact@v7
         with:
-          name: runners
+          name: FMI-LS-WASM-example-runners
           path: |
             build/adder-fmu-c-runner-build/adder-fmu-c-runner
             build/adder-fmu-rust-runner-build/adder-fmu-rust-runner
