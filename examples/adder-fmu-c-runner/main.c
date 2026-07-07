@@ -28,6 +28,7 @@ typedef enum {
 
 typedef struct {
     char model_identifier[256];
+    char instantiation_token[256];
     uint32_t vr_time;
     uint32_t vr_input_a;
     uint32_t vr_input_b;
@@ -225,6 +226,25 @@ static bool parse_model_description(const char *fmu_dir, fmu_metadata_t *metadat
     char *xml = NULL;
     if (!read_text_file(model_description_path, &xml)) {
         fprintf(stderr, "Failed to read %s\n", model_description_path);
+        return false;
+    }
+
+    const char *model_tag = strstr(xml, "<fmiModelDescription");
+    if (model_tag == NULL) {
+        fprintf(stderr, "Missing fmiModelDescription element in modelDescription.xml\n");
+        free(xml);
+        return false;
+    }
+    const char *model_end = find_tag_end(model_tag);
+    if (model_end == NULL) {
+        fprintf(stderr, "Malformed fmiModelDescription element in modelDescription.xml\n");
+        free(xml);
+        return false;
+    }
+    if (!parse_xml_attribute(model_tag, model_end, "instantiationToken", metadata_out->instantiation_token,
+                             sizeof(metadata_out->instantiation_token))) {
+        fprintf(stderr, "Missing fmiModelDescription instantiationToken in modelDescription.xml\n");
+        free(xml);
         return false;
     }
 
@@ -499,7 +519,7 @@ static bool run_native_fmu(const char *native_path, const fmu_metadata_t *metada
     }
 
     fmi3Instance cs_instance = api.instantiate_co_simulation(
-        "adder-1", "", "", fmi3False, fmi3False, fmi3False, fmi3False,
+        "adder-1", metadata->instantiation_token, "", fmi3False, fmi3False, fmi3False, fmi3False,
         NULL, 0, NULL, native_log_message, native_intermediate_update);
     if (cs_instance == NULL) {
         fprintf(stderr, "fmi3InstantiateCoSimulation returned NULL\n");
@@ -1014,7 +1034,7 @@ int main(int argc, char **argv) {
 
     wasmtime_component_val_t instantiate_args[8];
     instantiate_args[0] = make_string_val("adder-1");
-    instantiate_args[1] = make_string_val("");
+    instantiate_args[1] = make_string_val(metadata.instantiation_token);
     instantiate_args[2] = make_string_val("");
     instantiate_args[3] = make_bool_val(false);
     instantiate_args[4] = make_bool_val(false);

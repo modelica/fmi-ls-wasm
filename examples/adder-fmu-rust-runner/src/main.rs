@@ -138,6 +138,7 @@ struct VariableReferences {
 
 struct FmuMetadata {
     model_identifier: String,
+    instantiation_token: String,
     vrs: VariableReferences,
 }
 
@@ -177,6 +178,11 @@ fn read_fmu_metadata(fmu_dir: &Path) -> Result<FmuMetadata> {
     let model_identifier = co_simulation
         .attribute("modelIdentifier")
         .context("Missing CoSimulation modelIdentifier in modelDescription.xml")?
+        .to_owned();
+
+    let instantiation_token = root
+        .attribute("instantiationToken")
+        .context("Missing fmiModelDescription instantiationToken in modelDescription.xml")?
         .to_owned();
 
     let model_variables = root
@@ -223,6 +229,7 @@ fn read_fmu_metadata(fmu_dir: &Path) -> Result<FmuMetadata> {
 
     Ok(FmuMetadata {
         model_identifier,
+        instantiation_token,
         vrs,
     })
 }
@@ -312,7 +319,7 @@ fn main() -> Result<()> {
         .call_instantiate_co_simulation(
             &mut store,
             "adder-1",  // instance name
-            "",         // instantiation token
+            &metadata.instantiation_token,
             "",         // resource path
             false,      // visible
             false,      // logging on
