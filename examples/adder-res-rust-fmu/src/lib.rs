@@ -1,29 +1,20 @@
-//! # adder-rust-fmu
+//! # adder-res-rust-fmu
 //!
-//! A minimal FMI 3.0 Co-Simulation FMU implemented as a WebAssembly component.
+//! A minimal FMI 3.0 Co-Simulation FMU that reads a floating-point offset
+//! from `resources/offset.txt` during instantiation and adds it to the sum.
 //!
 //! ## Variables
 //!
-//! | Value Reference | Name      | Causality     | Type    | Description               |
-//! |-----------------|-----------|---------------|---------|---------------------------|
-//! | 0               | `time`    | independent   | Float64 | Independent time variable |
-//! | 1               | `input_a` | input         | Float64 | First addend              |
-//! | 2               | `input_b` | input         | Float64 | Second addend             |
-//! | 3               | `sum`     | output        | Float64 | sum = input_a + input_b   |
+//! | Value Reference | Name      | Causality     | Type    | Description                         |
+//! |-----------------|-----------|---------------|---------|-------------------------------------|
+//! | 0               | `time`    | independent   | Float64 | Independent time variable           |
+//! | 1               | `input_a` | input         | Float64 | First addend                        |
+//! | 2               | `input_b` | input         | Float64 | Second addend                       |
+//! | 3               | `sum`     | output        | Float64 | sum = input_a + input_b + offset    |
 //!
-//! ## Lifecycle
-//!
-//! ```text
-//! co-simulation-instance::instantiate-co-simulation(...)  → cs
-//! co-simulation-instance::enter-initialization-mode(cs, ...)
-//! co-simulation-instance::set-float64(cs, [1, 2], [a0, b0])
-//! co-simulation-instance::exit-initialization-mode(cs)
-//! loop:
-//!   co-simulation-instance::set-float64(cs, [1, 2], [a, b])
-//!   co-simulation-instance::get-float64(cs, [0, 3])
-//!   co-simulation-instance::do-step(cs, t, h, false)
-//! co-simulation-instance::terminate(cs)
-//! ```
+//! The offset value is read once via `resource-dir-callbacks.read-file("offset.txt")`.
+//! This demonstrates the `resource-dir-callbacks` interface for FMUs that need
+//! access to files in their `resources/` directory.
 
 #![allow(unused_variables)]
 
@@ -65,6 +56,7 @@ struct AdderData {
     current_time: f64,
     input_a: f64,
     input_b: f64,
+    offset: f64,
     output_sum: f64,
 }
 
@@ -91,11 +83,11 @@ fn store_set<R>(idx: usize, f: impl FnOnce(&mut AdderData) -> R) -> R {
 // co-simulation::co-simulation-instance resource
 // ---------------------------------------------------------------------------
 
-pub struct AdderCoSimInstance {
+pub struct AdderResCoSimInstance {
     idx: usize,
 }
 
-impl GuestCoSimulationInstance for AdderCoSimInstance {
+impl GuestCoSimulationInstance for AdderResCoSimInstance {
 
     // ── Static factory ───────────────────────────────────────────────────────
 
@@ -108,9 +100,20 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         _early_return_allowed:            bool,
         _required_intermediate_variables: Vec<u32>,
     ) -> Option<exports::fmi::fmi3::co_simulation::CoSimulationInstance> {
+        // Read the numeric offset from resources/offset.txt via the
+        // resource-dir-callbacks interface provided by the host.
+        let offset: f64 = match fmi::fmi3::resource_dir_callbacks::read_file("offset.txt") {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                text.trim().parse::<f64>().unwrap_or(0.0)
+            }
+            Err(_) => 0.0,
+        };
+
         let idx = store_alloc();
+        store_set(idx, |d| d.offset = offset);
         Some(exports::fmi::fmi3::co_simulation::CoSimulationInstance::new(
-            AdderCoSimInstance { idx },
+            AdderResCoSimInstance { idx },
         ))
     }
 
@@ -159,7 +162,8 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
             d.current_time = 0.0;
             d.input_a = 0.0;
             d.input_b = 0.0;
-            d.output_sum = 0.0;
+            // offset is kept across reset
+            d.output_sum = d.offset;
         });
         Status::Ok
     }
@@ -201,9 +205,8 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
             Status::Ok
         });
         if store_get(self.idx, |d| d.in_initialization_mode) {
-            // Update output sum immediately when in initialization mode.
             store_set(self.idx, |d| {
-                d.output_sum = d.input_a + d.input_b;
+                d.output_sum = d.input_a + d.input_b + d.offset;
             });
         }
         Status::Ok
@@ -245,7 +248,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 
     fn get_number_of_variable_dependencies(&self, vr: u32) -> Result<u64, Status> {
         match vr {
-            VR_OUTPUT_SUM => Ok(2),  // depends on VR_INPUT_A and VR_INPUT_B
+            VR_OUTPUT_SUM => Ok(2),
             _             => Err(Status::Error),
         }
     }
@@ -279,31 +282,28 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 
     fn get_fmu_state(&self) -> Result<Vec<u8>, Status> {
         store_get(self.idx, |d| {
-            let mut bytes = Vec::with_capacity(1 + 4 * 8);
+            let mut bytes = Vec::with_capacity(1 + 5 * 8);
             bytes.push(if d.in_initialization_mode { 1 } else { 0 });
             bytes.extend_from_slice(&d.current_time.to_le_bytes());
             bytes.extend_from_slice(&d.input_a.to_le_bytes());
             bytes.extend_from_slice(&d.input_b.to_le_bytes());
+            bytes.extend_from_slice(&d.offset.to_le_bytes());
             bytes.extend_from_slice(&d.output_sum.to_le_bytes());
             Ok(bytes)
         })
     }
 
     fn set_fmu_state(&self, state: Vec<u8>) -> Status {
-        if state.len() < 1 + 4 * 8 {
+        if state.len() < 1 + 5 * 8 {
             return Status::Error;
         }
-        let in_initialization_mode = state[0] != 0;
-        let time = f64::from_le_bytes(state[1..9].try_into().unwrap());
-        let a = f64::from_le_bytes(state[9..17].try_into().unwrap());
-        let b = f64::from_le_bytes(state[17..25].try_into().unwrap());
-        let output_sum = f64::from_le_bytes(state[25..33].try_into().unwrap());
         store_set(self.idx, |d| {
-            d.in_initialization_mode = in_initialization_mode;
-            d.current_time = time;
-            d.input_a = a;
-            d.input_b = b;
-            d.output_sum = output_sum;
+            d.in_initialization_mode = state[0] != 0;
+            d.current_time = f64::from_le_bytes(state[1..9].try_into().unwrap());
+            d.input_a      = f64::from_le_bytes(state[9..17].try_into().unwrap());
+            d.input_b      = f64::from_le_bytes(state[17..25].try_into().unwrap());
+            d.offset       = f64::from_le_bytes(state[25..33].try_into().unwrap());
+            d.output_sum   = f64::from_le_bytes(state[33..41].try_into().unwrap());
         });
         Status::Ok
     }
@@ -339,8 +339,6 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         if unknowns != [VR_OUTPUT_SUM] {
             return Err(Status::Error);
         }
-        // Jᵀ · seed: for sum = a + b the transpose Jacobian is a column of
-        // ones, so each output sensitivity equals the single seed entry.
         let s = seed.first().copied().unwrap_or(0.0);
         let sensitivity: Vec<f64> = knowns
             .iter()
@@ -393,7 +391,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         let next_time = current_communication_point + communication_step_size;
         store_set(self.idx, |d| {
             d.current_time = next_time;
-            d.output_sum = d.input_a + d.input_b;
+            d.output_sum = d.input_a + d.input_b + d.offset;
         });
         Ok(DoStepResult {
             last_successful_time:  next_time,
@@ -427,16 +425,16 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 // World binding
 // ---------------------------------------------------------------------------
 
-struct AdderFmu;
+struct AdderResFmu;
 
-impl CommonGuest for AdderFmu {
+impl CommonGuest for AdderResFmu {
     fn get_version() -> String {
         "3.0".to_string()
     }
 }
 
-impl CoSimulationGuest for AdderFmu {
-    type CoSimulationInstance = AdderCoSimInstance;
+impl CoSimulationGuest for AdderResFmu {
+    type CoSimulationInstance = AdderResCoSimInstance;
 }
 
-export!(AdderFmu);
+export!(AdderResFmu);

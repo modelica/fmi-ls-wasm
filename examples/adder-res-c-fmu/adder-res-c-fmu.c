@@ -1,12 +1,21 @@
 /*
- * adder-c-fmu — FMI 3.0 Co-Simulation FMU in pure C.
+ * adder-res-c-fmu — FMI 3.0 Co-Simulation FMU in pure C with resource access.
  *
  * Variables
  * ---------
  *  VR 0  time      independent  Float64  Independent time variable
  *  VR 1  input_a   input        Float64  First addend
  *  VR 2  input_b   input        Float64  Second addend
- *  VR 3  sum       output       Float64  sum = input_a + input_b
+ *  VR 3  sum       output       Float64  sum = input_a + input_b + offset
+ *
+ * At instantiation, `offset` is read from resources/offset.txt:
+ *
+ *   __wasm__   Uses the resource-dir-callbacks imported interface.
+ *              read-file("offset.txt") returns the raw file bytes.
+ *
+ *   (else)     Uses the FMI 3.0 `resourcePath` argument together with
+ *              fopen to read <resourcePath>/offset.txt from the host
+ *              filesystem.
  *
  * Two API modes, selected at compile-time via preprocessor:
  *
@@ -27,13 +36,14 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 /* ══════════════════════════════════════════════════════════════════════════
  * Common instance state fields
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /*
- * Shared fields for every adder instance regardless of API path.
+ * Shared fields for every adder-res instance regardless of API path.
  * Expand inside each path's struct definition below.
  */
 #define ADDER_INSTANCE_FIELDS \
@@ -41,6 +51,7 @@
     double current_time;           \
     double input_a;                \
     double input_b;                \
+    double offset;                 \
     double output_sum
 
 /* ── Value-reference assignments ─────────────────────────────────────────── */
@@ -95,14 +106,15 @@ typedef struct {
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /*
- * State layout (33 bytes):
+ * State layout (41 bytes):
  *   [0]      : in_initialization_mode (1 = true)
  *   [1..8]   : current_time  (f64 little-endian)
  *   [9..16]  : input_a       (f64 little-endian)
  *   [17..24] : input_b       (f64 little-endian)
- *   [25..32] : output_sum    (f64 little-endian)
+ *   [25..32] : offset        (f64 little-endian)
+ *   [33..40] : output_sum    (f64 little-endian)
  */
-#define ADDER_STATE_SIZE (1 + 4 * 8)
+#define ADDER_STATE_SIZE (1 + 5 * 8)
 
 static void write_f64_le(uint8_t *dst, double v)
 {
@@ -177,7 +189,7 @@ static bool adder_impl_set_float64(
         }
     }
     if (inst->in_initialization_mode) {
-        inst->output_sum = inst->input_a + inst->input_b;
+        inst->output_sum = inst->input_a + inst->input_b + inst->offset;
     }
     return true;
 }
@@ -191,7 +203,7 @@ static void adder_impl_do_step(
     double communication_step_size)
 {
     inst->current_time = current_communication_point + communication_step_size;
-    inst->output_sum   = inst->input_a + inst->input_b;
+    inst->output_sum   = inst->input_a + inst->input_b + inst->offset;
 }
 
 /*
@@ -203,7 +215,8 @@ static void adder_impl_serialize_state(const adder_instance_t *inst, uint8_t *bu
     write_f64_le(buf + 1,  inst->current_time);
     write_f64_le(buf + 9,  inst->input_a);
     write_f64_le(buf + 17, inst->input_b);
-    write_f64_le(buf + 25, inst->output_sum);
+    write_f64_le(buf + 25, inst->offset);
+    write_f64_le(buf + 33, inst->output_sum);
 }
 
 /*
@@ -215,7 +228,8 @@ static void adder_impl_deserialize_state(adder_instance_t *inst, const uint8_t *
     inst->current_time = read_f64_le(buf + 1);
     inst->input_a      = read_f64_le(buf + 9);
     inst->input_b      = read_f64_le(buf + 17);
-    inst->output_sum   = read_f64_le(buf + 25);
+    inst->offset       = read_f64_le(buf + 25);
+    inst->output_sum   = read_f64_le(buf + 33);
 }
 
 /*
@@ -267,6 +281,46 @@ static bool adder_impl_get_adj_deriv(
 
 #ifdef __wasm__
 
+/* ── Resource offset helper ──────────────────────────────────────────────── */
+
+/*
+ * Ask the host for the contents of resources/offset.txt via the optional
+ * fmi:fmi3/resource-dir-callbacks import, parse the ASCII decimal value
+ * and return it.  Returns 0.0 on any error (file not found, parse failure).
+ */
+static double read_resource_offset(void)
+{
+    co_simulation_fmu_string_t path;
+    path.ptr = (uint8_t *)"offset.txt";
+    path.len = 10; /* strlen("offset.txt") */
+
+    co_simulation_fmu_list_u8_t ok_data;
+    co_simulation_fmu_string_t  err_str;
+    memset(&ok_data,  0, sizeof(ok_data));
+    memset(&err_str,  0, sizeof(err_str));
+
+    if (!fmi_fmi3_resource_dir_callbacks_read_file(&path, &ok_data, &err_str)) {
+        /* err_str is set on failure — free it and return default */
+        co_simulation_fmu_string_free(&err_str);
+        return 0.0;
+    }
+
+    /* Parse the bytes as ASCII decimal; null-terminate for sscanf. */
+    double offset = 0.0;
+    if (ok_data.len > 0) {
+        char *buf = (char *)malloc(ok_data.len + 1);
+        if (buf) {
+            memcpy(buf, ok_data.ptr, ok_data.len);
+            buf[ok_data.len] = '\0';
+            sscanf(buf, "%lf", &offset);
+            free(buf);
+        }
+    }
+
+    co_simulation_fmu_list_u8_free(&ok_data);
+    return offset;
+}
+
 /* ── common interface ────────────────────────────────────────────────────── */
 
 void exports_fmi_fmi3_common_get_version(co_simulation_fmu_string_t *ret)
@@ -300,6 +354,8 @@ bool exports_fmi_fmi3_co_simulation_static_co_simulation_instance_instantiate_co
 
     adder_instance_t *inst = (adder_instance_t *)calloc(1, sizeof(adder_instance_t));
     if (!inst) return false;
+
+    inst->offset = read_resource_offset();
 
     *ret = exports_fmi_fmi3_co_simulation_co_simulation_instance_new(inst);
     return true;
@@ -375,11 +431,14 @@ exports_fmi_fmi3_co_simulation_status_t
 exports_fmi_fmi3_co_simulation_method_co_simulation_instance_reset(
     exports_fmi_fmi3_co_simulation_borrow_co_simulation_instance_t self)
 {
+    /* offset is preserved across reset */
+    double saved_offset          = self->offset;
     self->in_initialization_mode = false;
-    self->current_time  = 0.0;
-    self->input_a       = 0.0;
-    self->input_b       = 0.0;
-    self->output_sum    = 0.0;
+    self->current_time           = 0.0;
+    self->input_a                = 0.0;
+    self->input_b                = 0.0;
+    self->offset                 = saved_offset;
+    self->output_sum             = saved_offset;
     return FMI_FMI3_TYPES_STATUS_OK;
 }
 
@@ -854,6 +913,39 @@ FMI3_Export fmi3Status fmi3SetDebugLogging(
 
 /* ── Instance creation / destruction ─────────────────────────────────────── */
 
+/*
+ * Read offset.txt from the FMU resource directory.
+ * `resource_path` is the path to the resources/ directory as given by the
+ * `resourcePath` argument of `fmi3InstantiateCoSimulation`.
+ * Returns 0.0 on any error (missing path, file not found, parse failure).
+ */
+static double read_resource_offset_native(const char *resource_path)
+{
+    if (!resource_path || resource_path[0] == '\0') return 0.0;
+
+    /* Construct "<resource_path>/offset.txt" (handle trailing separator). */
+    size_t rlen = strlen(resource_path);
+    size_t flen = rlen + 1 + strlen("offset.txt") + 1;
+    char *path = (char *)malloc(flen);
+    if (!path) return 0.0;
+
+    int needs_sep = (resource_path[rlen - 1] != '/' &&
+                     resource_path[rlen - 1] != '\\');
+    if (needs_sep)
+        snprintf(path, flen, "%s/offset.txt", resource_path);
+    else
+        snprintf(path, flen, "%soffset.txt", resource_path);
+
+    FILE *f = fopen(path, "r");
+    free(path);
+    if (!f) return 0.0;
+
+    double offset = 0.0;
+    fscanf(f, "%lf", &offset);
+    fclose(f);
+    return offset;
+}
+
 FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
     fmi3String                     instanceName,
     fmi3String                     instantiationToken,
@@ -868,7 +960,7 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
     fmi3LogMessageCallback         logMessage,
     fmi3IntermediateUpdateCallback intermediateUpdate)
 {
-    (void)instanceName; (void)instantiationToken; (void)resourcePath;
+    (void)instanceName; (void)instantiationToken;
     (void)visible; (void)loggingOn; (void)eventModeUsed; (void)earlyReturnAllowed;
     (void)requiredIntermediateVariables; (void)nRequiredIntermediateVariables;
 
@@ -877,6 +969,7 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
     inst->instance_env           = instanceEnvironment;
     inst->log_cb                 = logMessage;
     inst->intermediate_update_cb = intermediateUpdate;
+    inst->offset                 = read_resource_offset_native(resourcePath);
     return (fmi3Instance)inst;
 }
 
@@ -924,11 +1017,12 @@ FMI3_Export fmi3Status fmi3Terminate(fmi3Instance instance)
 FMI3_Export fmi3Status fmi3Reset(fmi3Instance instance)
 {
     adder_instance_t *inst = (adder_instance_t *)instance;
+    /* offset is preserved across reset */
     inst->in_initialization_mode = false;
-    inst->current_time  = 0.0;
-    inst->input_a       = 0.0;
-    inst->input_b       = 0.0;
-    inst->output_sum    = 0.0;
+    inst->current_time           = 0.0;
+    inst->input_a                = 0.0;
+    inst->input_b                = 0.0;
+    inst->output_sum             = inst->offset;
     return fmi3OK;
 }
 

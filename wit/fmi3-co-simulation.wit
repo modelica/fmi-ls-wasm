@@ -41,7 +41,6 @@ interface co-simulation {
     instantiate-co-simulation: static func(
       instance-name:                        string,
       instantiation-token:                  string,
-      resource-path:                        string,
       visible:                              bool,
       logging-on:                           bool,
       event-mode-used:                      bool,

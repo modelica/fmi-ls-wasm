@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fmiModelDescription
+  fmiVersion="3.0"
+  modelName="adder-res-c-fmu"
+  instantiationToken="{deadbeef-cafe-f00d-babe-0123456789ac}"
+  description="FMI 3.0 Co-Simulation FMU in C: sum = input_a + input_b + offset (offset read from resources/offset.txt)"
+  version="0.1.0"
+  generationTool="wit-bindgen / C / wasm32-wasip2">
+  <CoSimulation
+    modelIdentifier="adder_res_c_fmu"
+    canHandleVariableCommunicationStepSize="true"
+    hasEventMode="false"/>
+  <DefaultExperiment startTime="0.0" stepSize="0.1"/>
+  <ModelVariables>
+    <Float64
+      name="time"
+      valueReference="0"
+      causality="independent"
+      variability="continuous"
+      description="Independent time variable"/>
+    <Float64
+      name="input_a"
+      valueReference="1"
+      causality="input"
+      variability="continuous"
+      start="0.0"
+      description="First addend"/>
+    <Float64
+      name="input_b"
+      valueReference="2"
+      causality="input"
+      variability="continuous"
+      start="0.0"
+      description="Second addend"/>
+    <Float64
+      name="sum"
+      valueReference="3"
+      causality="output"
+      variability="continuous"
+      description="sum = input_a + input_b + offset"/>
+  </ModelVariables>
+  <ModelStructure>
+    <Output valueReference="3"/>
+    <InitialUnknown valueReference="3"/>
+  </ModelStructure>
+</fmiModelDescription>
