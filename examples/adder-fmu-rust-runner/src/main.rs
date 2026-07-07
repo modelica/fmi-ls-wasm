@@ -72,8 +72,9 @@ const TARGET_PLATFORM: &str = "wasm32-wasip2";
 /// Must implement [`WasiView`] (for WASI P2 imports from the Rust std-lib
 /// embedded in the component) and the FMI callback host traits.
 struct HostState {
-    wasi:  WasiCtx,
-    table: wasmtime::component::ResourceTable,
+    wasi:          WasiCtx,
+    table:         wasmtime::component::ResourceTable,
+    resources_dir: Option<std::path::PathBuf>,
 }
 
 impl WasiView for HostState {
@@ -117,6 +118,20 @@ impl fmi::fmi3::intermediate_update_callbacks::Host for HostState {
         _can_return_early:                    bool,
     ) -> (bool, f64) {
         (false, 0.0)
+    }
+}
+
+/// Host implementation of `fmi:fmi3/resource-dir-callbacks`.
+///
+/// Used by FMUs that declare a `resources/` directory in their archive.
+/// Provides read-only access to files within that directory.
+impl fmi::fmi3::resource_dir_callbacks::Host for HostState {
+    fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
+        let dir = self.resources_dir.as_ref()
+            .ok_or_else(|| "No resources directory available".to_owned())?;
+        let full_path = dir.join(&path);
+        std::fs::read(&full_path)
+            .map_err(|e| format!("Failed to read '{}': {e}", full_path.display()))
     }
 }
 
@@ -273,6 +288,19 @@ fn main() -> Result<()> {
     println!("Extracted FMU to '{}'", tmp_dir.path().display());
     println!("Loading wasm component: '{}'", wasm_path.display());
 
+    // ── Determine resources directory and offset ───────────────────────────
+    let resources_dir: Option<std::path::PathBuf> = {
+        let d = tmp_dir.path().join("resources");
+        if d.is_dir() { Some(d) } else { None }
+    };
+    // If the FMU provides resources/offset.txt, read a numeric offset that
+    // is added to the expected sum in assertions.
+    let (offset, have_offset): (f64, bool) = resources_dir.as_ref()
+        .and_then(|d| fs::read_to_string(d.join("offset.txt")).ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map(|o| (o, true))
+        .unwrap_or((0.0, false));
+
     // ── Engine & component ─────────────────────────────────────────────────
     let mut cfg = Config::new();
     cfg.wasm_component_model(true);
@@ -293,8 +321,9 @@ fn main() -> Result<()> {
     let mut store = Store::new(
         &engine,
         HostState {
-            wasi:  WasiCtxBuilder::new().build(),
-            table: wasmtime::component::ResourceTable::new(),
+            wasi:          WasiCtxBuilder::new().build(),
+            table:         wasmtime::component::ResourceTable::new(),
+            resources_dir,
         },
     );
 
@@ -320,7 +349,6 @@ fn main() -> Result<()> {
             &mut store,
             "adder-1",  // instance name
             &metadata.instantiation_token,
-            "",         // resource path
             false,      // visible
             false,      // logging on
             false,      // event mode used
@@ -419,7 +447,6 @@ fn main() -> Result<()> {
         );
 
         // -- 3. Read and verify output and time at the new communication point --------
-        let expected_sum = input_a + input_b;
         let get_result = world
             .fmi_fmi3_co_simulation()
             .co_simulation_instance()
@@ -439,6 +466,7 @@ fn main() -> Result<()> {
 
         // Verify output sum
         let got = values[1];
+        let expected_sum = input_a + input_b + offset;
         assert!(
             (got - expected_sum).abs() < tolerance,
             "step {i} (t={t_next:.1}): output sum = {got} but expected {expected_sum}",
@@ -453,7 +481,8 @@ fn main() -> Result<()> {
 
     println!(
         "OK — all {n_steps} steps passed: \
-         adder FMU correctly computes sum = input_a + input_b at every communication point."
+         adder FMU correctly computes sum = input_a + input_b{}.",
+        if have_offset { " + offset" } else { "" }
     );
 
     // tmp_dir is dropped here, removing the extracted FMU files.

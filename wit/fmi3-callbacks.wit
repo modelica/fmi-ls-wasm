@@ -57,6 +57,7 @@ interface callbacks {
 // Separated from the base `callbacks` interface so that simpler CS FMUs
 // do not need to depend on it.
 interface intermediate-update-callbacks {
+
   use types.{status};
 
   /// Notify the master of an intermediate internal state that can optionally
@@ -85,4 +86,25 @@ interface intermediate-update-callbacks {
   ) -> tuple<bool, f64>;
   //          ^           ^
   //  early-return-requested  early-return-time
+}
+
+// Callback interface provided by the host for FMUs that declare a resources/
+// directory inside their FMU archive.
+//
+// FMUs that do not have a resources directory MUST NOT import this interface.
+// Importers MUST provide an implementation when the FMU component imports it.
+//
+// This interface replaces the resource-path string argument that was passed
+// to the fmi3Instantiate* C functions: because WASI filesystem access requires
+// a pre-opened directory handle granted by the host (not a bare path string),
+// the host provides file access through this callback rather than a path.
+interface resource-dir-callbacks {
+  /// Read the contents of a file from the FMU's resources directory.
+  ///
+  /// `path` is relative to the resources/ directory within the FMU archive
+  /// (e.g., "config.dat" resolves to resources/config.dat).
+  ///
+  /// Returns the raw file bytes on success, or an error message string if
+  /// the file cannot be opened or read.
+  read-file: func(path: string) -> result<list<u8>, string>;
 }

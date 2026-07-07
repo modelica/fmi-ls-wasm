@@ -803,6 +803,125 @@ static void cleanup_vals(wasmtime_component_val_t *vals, size_t nvals) {
     }
 }
 
+/* ── resource-dir-callbacks host implementation ──────────────────────────── */
+
+typedef struct {
+    char *resources_dir;  /* strdup'd absolute path, or NULL if not present */
+} read_file_ctx_t;
+
+static wasmtime_error_t *read_file_cb(
+    void *data,
+    wasmtime_context_t *ctx,
+    const wasmtime_component_func_type_t *ty,
+    wasmtime_component_val_t *args, size_t nargs,
+    wasmtime_component_val_t *results, size_t nresults)
+{
+    (void)ctx; (void)ty; (void)nresults;
+    read_file_ctx_t *rctx = (read_file_ctx_t *)data;
+
+    /* Build the result payload: result<list<u8>, string> */
+    wasmtime_component_val_t *payload = calloc(1, sizeof(*payload));
+
+    if (nargs < 1 || args[0].kind != WASMTIME_COMPONENT_STRING || rctx->resources_dir == NULL) {
+        const char *errmsg = (rctx->resources_dir == NULL)
+            ? "no resources directory available"
+            : "read-file: expected string argument";
+        payload->kind = WASMTIME_COMPONENT_STRING;
+        wasm_name_new(&payload->of.string, strlen(errmsg), errmsg);
+        results[0].kind = WASMTIME_COMPONENT_RESULT;
+        results[0].of.result.is_ok = false;
+        results[0].of.result.val = payload;
+        return NULL;
+    }
+
+    const char *rel = args[0].of.string.data;
+    size_t rel_len = args[0].of.string.size;
+    size_t dir_len = strlen(rctx->resources_dir);
+    char *full = malloc(dir_len + 1 + rel_len + 1);
+    memcpy(full, rctx->resources_dir, dir_len);
+    full[dir_len] = '/';
+    memcpy(full + dir_len + 1, rel, rel_len);
+    full[dir_len + 1 + rel_len] = '\0';
+
+    uint8_t *file_data = NULL;
+    size_t file_len = 0;
+    bool ok = read_binary_file(full, &file_data, &file_len);
+    free(full);
+
+    if (ok) {
+        payload->kind = WASMTIME_COMPONENT_LIST;
+        wasmtime_component_val_t *items =
+            calloc(file_len > 0 ? file_len : 1, sizeof(*items));
+        for (size_t i = 0; i < file_len; ++i) {
+            items[i].kind = WASMTIME_COMPONENT_U8;
+            items[i].of.u8 = file_data[i];
+        }
+        wasmtime_component_vallist_new(&payload->of.list, file_len, items);
+        free(items);
+        free(file_data);
+        results[0].kind = WASMTIME_COMPONENT_RESULT;
+        results[0].of.result.is_ok = true;
+        results[0].of.result.val = payload;
+    } else {
+        const char *errmsg = "failed to read file";
+        payload->kind = WASMTIME_COMPONENT_STRING;
+        wasm_name_new(&payload->of.string, strlen(errmsg), errmsg);
+        results[0].kind = WASMTIME_COMPONENT_RESULT;
+        results[0].of.result.is_ok = false;
+        results[0].of.result.val = payload;
+    }
+
+    return NULL;
+}
+
+static void read_file_ctx_finalizer(void *data) {
+    read_file_ctx_t *rctx = (read_file_ctx_t *)data;
+    if (rctx) {
+        free(rctx->resources_dir);
+        free(rctx);
+    }
+}
+
+/* Register fmi:fmi3/resource-dir-callbacks@3.0.0 into the linker.
+ * resources_dir may be NULL when the FMU has no resources directory; the
+ * callback will then always return an error, but the linker entry is still
+ * required so that FMUs that import this interface can be instantiated.
+ */
+static bool register_resource_dir_callbacks(
+    wasmtime_component_linker_t *linker,
+    const char *resources_dir)
+{
+    static const char IFACE[] = "fmi:fmi3/resource-dir-callbacks@3.0.0";
+    static const char FUNC[]  = "read-file";
+
+    wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(linker);
+    if (root == NULL) {
+        fprintf(stderr, "Failed to get linker root instance\n");
+        return false;
+    }
+
+    wasmtime_component_linker_instance_t *iface_inst = NULL;
+    wasmtime_error_t *err = wasmtime_component_linker_instance_add_instance(
+        root, IFACE, strlen(IFACE), &iface_inst);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to add resource-dir-callbacks instance", err);
+        return false;
+    }
+
+    read_file_ctx_t *rctx = calloc(1, sizeof(*rctx));
+    rctx->resources_dir = resources_dir ? strdup(resources_dir) : NULL;
+
+    err = wasmtime_component_linker_instance_add_func(
+        iface_inst, FUNC, strlen(FUNC), read_file_cb, rctx, read_file_ctx_finalizer);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to register read-file callback", err);
+        read_file_ctx_finalizer(rctx);
+        return false;
+    }
+
+    return true;
+}
+
 static bool parse_do_step_result(const wasmtime_component_val_t *result_val,
                                  double *last_successful_time,
                                  bool *terminate_simulation,
@@ -874,12 +993,40 @@ int main(int argc, char **argv) {
     char wasm_path[4096];
     char native_path[4096];
     char native_platform[256];
+    char resources_dir[4096];
     fmu_metadata_t metadata;
     memset(&metadata, 0, sizeof(metadata));
+    resources_dir[0] = '\0';
 
     if (!extract_fmu_to_temp(fmu_path, tmp_dir, sizeof(tmp_dir))) {
         fprintf(stderr, "Failed to extract FMU archive: %s\n", fmu_path);
         return 1;
+    }
+
+    /* Check for a resources/ directory in the extracted FMU */
+    {
+        char candidate[4096];
+        snprintf(candidate, sizeof(candidate), "%s/resources", tmp_dir);
+        struct stat st;
+        if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
+            strncpy(resources_dir, candidate, sizeof(resources_dir) - 1);
+            resources_dir[sizeof(resources_dir) - 1] = '\0';
+        }
+    }
+
+    /* If resources/offset.txt is present, read the numeric offset for assertions */
+    double sim_offset = 0.0;
+    bool have_offset = false;
+    if (resources_dir[0] != '\0') {
+        char offset_path[4096];
+        snprintf(offset_path, sizeof(offset_path), "%s/offset.txt", resources_dir);
+        FILE *fp = fopen(offset_path, "r");
+        if (fp != NULL) {
+            fscanf(fp, "%lf", &sim_offset);
+            fclose(fp);
+            printf("FMU has resources/offset.txt with offset = %.17g\n", sim_offset);
+	    have_offset = true;
+        }
     }
 
     if (!parse_model_description(tmp_dir, &metadata)) {
@@ -978,6 +1125,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Register fmi:fmi3/resource-dir-callbacks for FMUs that need resource access */
+    if (!register_resource_dir_callbacks(linker, resources_dir[0] ? resources_dir : NULL)) {
+        wasmtime_component_linker_delete(linker);
+        wasmtime_component_delete(component);
+        wasmtime_store_delete(store);
+        wasm_engine_delete(engine);
+        return 1;
+    }
+
     wasmtime_component_instance_t instance;
     error = wasmtime_component_linker_instantiate(linker, ctx, component, &instance);
     if (error != NULL) {
@@ -1032,28 +1188,27 @@ int main(int argc, char **argv) {
     printf("Running adder-fmu from t=0.0 to t=%.1f s in %.1f s steps...\n", n_steps * step_size,
            step_size);
 
-    wasmtime_component_val_t instantiate_args[8];
+    wasmtime_component_val_t instantiate_args[7];
     instantiate_args[0] = make_string_val("adder-1");
     instantiate_args[1] = make_string_val(metadata.instantiation_token);
-    instantiate_args[2] = make_string_val("");
+    instantiate_args[2] = make_bool_val(false);
     instantiate_args[3] = make_bool_val(false);
     instantiate_args[4] = make_bool_val(false);
     instantiate_args[5] = make_bool_val(false);
-    instantiate_args[6] = make_bool_val(false);
-    instantiate_args[7] = make_u32_list_val(NULL, 0);
+    instantiate_args[6] = make_u32_list_val(NULL, 0);
 
     wasmtime_component_val_t instantiate_results[1];
     memset(instantiate_results, 0, sizeof(instantiate_results));
     if (!call_component_func("instantiate-co-simulation", &instantiate_func, ctx,
-                             instantiate_args, 8, instantiate_results, 1)) {
-        cleanup_vals(instantiate_args, 8);
+                             instantiate_args, 7, instantiate_results, 1)) {
+        cleanup_vals(instantiate_args, 7);
         wasmtime_component_linker_delete(linker);
         wasmtime_component_delete(component);
         wasmtime_store_delete(store);
         wasm_engine_delete(engine);
         return 1;
     }
-    cleanup_vals(instantiate_args, 8);
+    cleanup_vals(instantiate_args, 7);
 
     wasmtime_component_resource_any_t *cs_instance = NULL;
     if (instantiate_results[0].kind == WASMTIME_COMPONENT_OPTION &&
@@ -1266,7 +1421,7 @@ int main(int argc, char **argv) {
             }
 
             double expected_time = t + step_size;
-            double expected_sum = input_a + input_b;
+            double expected_sum = input_a + input_b + sim_offset;
             if (fabs(got_time - expected_time) > tolerance || fabs(got_sum - expected_sum) > tolerance) {
                 fprintf(stderr,
                         "value check failed at step %zu: time=%.17g expected=%.17g sum=%.17g expected=%.17g\n",
@@ -1317,7 +1472,7 @@ int main(int argc, char **argv) {
     }
     wasmtime_component_resource_any_delete(cs_instance);
 
-    printf("OK - all %zu steps passed: adder FMU correctly computes sum = input_a + input_b.\n", n_steps);
+    printf("OK - all %zu steps passed: adder FMU correctly computes sum = input_a + input_b%s.\n", n_steps,have_offset?" + offset":"");
 
     wasmtime_component_linker_delete(linker);
     wasmtime_component_delete(component);

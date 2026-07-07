@@ -29,16 +29,18 @@ Also included are examples show-casing the WIT definitions, using Rust, C and WA
 ```
 wit/
 ├── fmi3-types.wit                  # Primitive types, enums, records
-├── fmi3-callbacks.wit              # Environment → FMU callbacks
+├── fmi3-callbacks.wit              # Environment → FMU callbacks (incl. resource-dir-callbacks)
 ├── fmi3-common.wit                 # get-version free function only
 ├── fmi3-model-exchange.wit         # Standalone ME instance resource + all methods
 ├── fmi3-co-simulation.wit          # Standalone CS instance resource + all methods
 ├── fmi3-scheduled-execution.wit    # Standalone SE instance resource + all methods
 └── world.wit                       # Composed worlds for each FMU kind
 examples/
-├── adder-rust-fmu                  # Rust sample FMU
-├── adder-c-fmu                     # Native C sample FMU, including wasm and native targets
-├── adder-wat-fmu                   # WAT sample FMU
+├── adder-rust-fmu                  # Rust sample FMU (no resources)
+├── adder-c-fmu                     # Native C sample FMU, including wasm and native targets (no resources)
+├── adder-wat-fmu                   # WAT sample FMU (no resources)
+├── adder-res-rust-fmu              # Rust sample FMU using resource-dir-callbacks
+├── adder-res-c-fmu                 # C sample FMU using resource-dir-callbacks
 ├── adder-fmu-rust-runner           # Rust FMU import demonstration
 ├── adder-fmu-c-runner              # Native C FMU import demonstration for both wasm and native targets
 └── fmi-standard                    # Sub-module for the required FMI 3.0 headers for native targets
@@ -108,6 +110,32 @@ Component Model's closure semantics handle per-instance context automatically.
 
 The `intermediate-update-callbacks` interface is a separate import so that
 simple CS FMUs that do not support early return can omit it.
+
+### `resourcePath` → `resource-dir-callbacks` interface
+
+FMI 3.0 passes a `resourcePath` string to the instantiate functions so that
+FMUs can locate their resource files.  A plain filesystem path string is not
+viable in the WebAssembly Component Model because the sandbox has no native
+filesystem access.
+
+Instead, this layered standard replaces `resourcePath` with an optional
+imported interface:
+
+```wit
+interface resource-dir-callbacks {
+    read-file: func(path: string) -> result<list<u8>, string>;
+}
+```
+
+An FMU that requires resource files declares `import resource-dir-callbacks`
+in its world.  The host extracts the FMU archive, detects the presence of a
+`resources/` directory, and provides this interface backed by the extracted
+directory.  FMUs that do not need resource files do not import this interface
+and are unaffected.
+
+This design keeps the WebAssembly sandbox intact, allows hosts to control
+exactly which files the FMU can read, and follows the same optional-import
+pattern as `intermediate-update-callbacks`.
 
 ### Parallel C arrays → `list<T>` / `list<tuple<…>>`
 
