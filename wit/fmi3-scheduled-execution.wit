@@ -25,7 +25,6 @@ interface scheduled-execution {
     instantiate-scheduled-execution: static func(
       instance-name:        string,
       instantiation-token:  string,
-      resource-path:        string,
       visible:              bool,
       logging-on:           bool,
     ) -> option<scheduled-execution-instance>;

@@ -283,7 +283,6 @@ void exports_fmi_fmi3_common_get_version(co_simulation_fmu_string_t *ret)
 bool exports_fmi_fmi3_co_simulation_static_co_simulation_instance_instantiate_co_simulation(
     co_simulation_fmu_string_t  *instance_name,
     co_simulation_fmu_string_t  *instantiation_token,
-    co_simulation_fmu_string_t  *resource_path,
     bool visible,
     bool logging_on,
     bool event_mode_used,
@@ -293,7 +292,6 @@ bool exports_fmi_fmi3_co_simulation_static_co_simulation_instance_instantiate_co
 {
     (void)instance_name;
     (void)instantiation_token;
-    (void)resource_path;
     (void)visible;
     (void)logging_on;
     (void)event_mode_used;

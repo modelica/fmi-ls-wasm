@@ -102,7 +102,6 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
     fn instantiate_co_simulation(
         _instance_name:                   String,
         _instantiation_token:             String,
-        _resource_path:                   String,
         _visible:                         bool,
         _logging_on:                      bool,
         _event_mode_used:                 bool,

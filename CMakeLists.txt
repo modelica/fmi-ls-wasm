@@ -659,3 +659,342 @@ if(TARGET run-all-examples)
         add_dependencies(run-all-examples adder-wat-fmu-c-runner)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Example FMU: adder-res-rust-fmu
+#
+# Co-Simulation FMU in Rust that reads an offset from resources/offset.txt
+# via the resource-dir-callbacks interface.
+#
+# sum = input_a + input_b + offset  (offset = 42.0 from resources/offset.txt)
+# ---------------------------------------------------------------------------
+if(CARGO_EXECUTABLE)
+    set(ADDER_RES_RUST_FMU_DIR  "${CMAKE_SOURCE_DIR}/examples/adder-res-rust-fmu")
+    set(ADDER_RES_RUST_FMU_WASM
+        "${ADDER_RES_RUST_FMU_DIR}/target/wasm32-wasip2/release/adder_res_rust_fmu.wasm"
+    )
+    set(ADDER_RES_RUST_FMU_ARCHIVE  "${CMAKE_BINARY_DIR}/adder-res-rust-fmu.fmu")
+    set(ADDER_RES_RUST_FMU_STAGING  "${CMAKE_BINARY_DIR}/adder-res-rust-fmu-staging")
+    set(ADDER_RES_RUST_FMU_MODEL_DESC "${ADDER_RES_RUST_FMU_DIR}/modelDescription.xml")
+    set(ADDER_RES_RUST_FMU_RESOURCES "${ADDER_RES_RUST_FMU_DIR}/resources")
+
+    add_custom_command(
+        OUTPUT  "${ADDER_RES_RUST_FMU_WASM}"
+        COMMAND ${CARGO_EXECUTABLE} build --release
+        WORKING_DIRECTORY "${ADDER_RES_RUST_FMU_DIR}"
+        COMMENT "Building adder-res-rust-fmu Wasm component..."
+        VERBATIM
+        DEPENDS
+            "${ADDER_RES_RUST_FMU_DIR}/Cargo.toml"
+            "${ADDER_RES_RUST_FMU_DIR}/src/lib.rs"
+            ${WIT_FILES}
+    )
+
+    add_custom_target(adder-res-rust-fmu
+        DEPENDS "${ADDER_RES_RUST_FMU_WASM}"
+    )
+
+    add_custom_target(validate-adder-res-rust-fmu
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+                "${ADDER_RES_RUST_FMU_WASM}"
+        DEPENDS adder-res-rust-fmu
+        COMMENT "Validating adder-res-rust-fmu Wasm component..."
+        VERBATIM
+    )
+
+    add_test(
+        NAME adder-res-rust-fmu-wasm-validation
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+                "${ADDER_RES_RUST_FMU_WASM}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(adder-res-rust-fmu-wasm-validation
+        PROPERTIES DEPENDS wit-validation
+    )
+
+    add_custom_command(
+        OUTPUT "${ADDER_RES_RUST_FMU_ARCHIVE}"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_RES_RUST_FMU_STAGING}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${ADDER_RES_RUST_FMU_STAGING}/binaries/wasm32-wasip2"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_RES_RUST_FMU_MODEL_DESC}"
+                "${ADDER_RES_RUST_FMU_STAGING}/modelDescription.xml"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_RES_RUST_FMU_WASM}"
+                "${ADDER_RES_RUST_FMU_STAGING}/binaries/wasm32-wasip2/adder_res_rust_fmu.wasm"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${ADDER_RES_RUST_FMU_RESOURCES}"
+                "${ADDER_RES_RUST_FMU_STAGING}/resources"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${ADDER_RES_RUST_FMU_STAGING}"
+                ${CMAKE_COMMAND} -E tar cf "${ADDER_RES_RUST_FMU_ARCHIVE}" --format=zip
+                -- modelDescription.xml binaries resources
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        DEPENDS
+            adder-res-rust-fmu
+            "${ADDER_RES_RUST_FMU_MODEL_DESC}"
+        COMMENT "Packaging adder-res-rust-fmu FMU archive..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-res-rust-fmu-archive
+        DEPENDS "${ADDER_RES_RUST_FMU_ARCHIVE}"
+    )
+
+    if(TARGET adder-fmu-rust-runner-build)
+        add_custom_target(adder-res-rust-fmu-rust-runner
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RES_RUST_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                adder-fmu-rust-runner-build
+                adder-res-rust-fmu-archive
+            COMMENT "Running adder-fmu-rust-runner against adder-res-rust-fmu.fmu..."
+            VERBATIM
+        )
+
+        add_test(
+            NAME adder-res-rust-fmu-rust-runner
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RES_RUST_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(adder-res-rust-fmu-rust-runner
+            PROPERTIES DEPENDS adder-res-rust-fmu-wasm-validation
+        )
+    endif()
+
+    if(TARGET adder-fmu-c-runner-build)
+        add_custom_target(adder-res-rust-fmu-c-runner
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_RES_RUST_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                adder-fmu-c-runner-build
+                adder-res-rust-fmu-archive
+            COMMENT "Running adder-fmu-c-runner against adder-res-rust-fmu.fmu..."
+            VERBATIM
+        )
+
+        add_test(
+            NAME adder-res-rust-fmu-c-runner
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_RES_RUST_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(adder-res-rust-fmu-c-runner
+            PROPERTIES DEPENDS adder-res-rust-fmu-wasm-validation
+        )
+    endif()
+
+    if(TARGET run-all-examples)
+        add_dependencies(run-all-examples validate-adder-res-rust-fmu)
+        if(TARGET adder-res-rust-fmu-rust-runner)
+            add_dependencies(run-all-examples adder-res-rust-fmu-rust-runner)
+        endif()
+        if(TARGET adder-res-rust-fmu-c-runner)
+            add_dependencies(run-all-examples adder-res-rust-fmu-c-runner)
+        endif()
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Example FMU: adder-res-c-fmu
+#
+# Co-Simulation FMU in C that reads an offset from resources/offset.txt
+# via the resource-dir-callbacks interface.
+#
+# sum = input_a + input_b + offset  (offset = 42.0 from resources/offset.txt)
+# ---------------------------------------------------------------------------
+if(WIT_BINDGEN_EXECUTABLE)
+    set(ADDER_RES_C_FMU_DIR    "${CMAKE_SOURCE_DIR}/examples/adder-res-c-fmu")
+    set(ADDER_RES_C_FMU_BINDGEN_DIR "${CMAKE_BINARY_DIR}/adder-res-c-fmu-bindgen")
+
+    set(ADDER_RES_C_FMU_BINDGEN_H   "${ADDER_RES_C_FMU_BINDGEN_DIR}/co_simulation_fmu.h")
+    set(ADDER_RES_C_FMU_BINDGEN_C   "${ADDER_RES_C_FMU_BINDGEN_DIR}/co_simulation_fmu.c")
+    set(ADDER_RES_C_FMU_BINDGEN_OBJ "${ADDER_RES_C_FMU_BINDGEN_DIR}/co_simulation_fmu_component_type.o")
+
+    add_custom_command(
+        OUTPUT
+            "${ADDER_RES_C_FMU_BINDGEN_H}"
+            "${ADDER_RES_C_FMU_BINDGEN_C}"
+            "${ADDER_RES_C_FMU_BINDGEN_OBJ}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ADDER_RES_C_FMU_BINDGEN_DIR}"
+        COMMAND ${WIT_BINDGEN_EXECUTABLE} c
+                --world co-simulation-fmu
+                "${CMAKE_SOURCE_DIR}/wit"
+                --out-dir "${ADDER_RES_C_FMU_BINDGEN_DIR}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Generating C bindings for adder-res-c-fmu..."
+        VERBATIM
+        DEPENDS ${WIT_FILES}
+    )
+
+    set(ADDER_RES_C_FMU_WASM "${CMAKE_BINARY_DIR}/adder_res_c_fmu.wasm")
+
+    add_executable(adder-res-c-fmu-wasm
+        "${ADDER_RES_C_FMU_DIR}/adder-res-c-fmu.c"
+        "${ADDER_RES_C_FMU_BINDGEN_C}"
+    )
+
+    target_include_directories(adder-res-c-fmu-wasm PRIVATE "${ADDER_RES_C_FMU_BINDGEN_DIR}")
+
+    set_target_properties(adder-res-c-fmu-wasm PROPERTIES
+        OUTPUT_NAME "adder_res_c_fmu"
+        SUFFIX      ".wasm"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+
+    target_link_options(adder-res-c-fmu-wasm PRIVATE
+        "${ADDER_RES_C_FMU_BINDGEN_OBJ}"
+    )
+
+    add_custom_target(adder-res-c-fmu-bindgen
+        DEPENDS
+            "${ADDER_RES_C_FMU_BINDGEN_H}"
+            "${ADDER_RES_C_FMU_BINDGEN_C}"
+            "${ADDER_RES_C_FMU_BINDGEN_OBJ}"
+    )
+    add_dependencies(adder-res-c-fmu-wasm adder-res-c-fmu-bindgen)
+
+    add_custom_target(adder-res-c-fmu DEPENDS adder-res-c-fmu-wasm)
+
+    add_custom_target(validate-adder-res-c-fmu
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+                "${ADDER_RES_C_FMU_WASM}"
+        DEPENDS adder-res-c-fmu-wasm
+        COMMENT "Validating adder-res-c-fmu Wasm component..."
+        VERBATIM
+    )
+
+    add_test(
+        NAME adder-res-c-fmu-wasm-validation
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+                "${ADDER_RES_C_FMU_WASM}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(adder-res-c-fmu-wasm-validation
+        PROPERTIES DEPENDS wit-validation
+    )
+
+    # -----------------------------------------------------------------------
+    # Compile the C resource FMU to a native x86_64-linux shared library
+    #
+    # The same source file is used with the native toolchain; __wasm__ is not
+    # defined so the #else branch (standard FMI 3.0 C API) activates.
+    # -----------------------------------------------------------------------
+    set(ADDER_RES_C_FMU_NATIVE_SO "${CMAKE_BINARY_DIR}/adder_res_c_fmu.so")
+
+    add_custom_command(
+        OUTPUT "${ADDER_RES_C_FMU_NATIVE_SO}"
+        COMMAND cc -std=c11 -O2 -Wall -Wextra -shared -fPIC
+                "${ADDER_RES_C_FMU_DIR}/adder-res-c-fmu.c"
+                -o "${ADDER_RES_C_FMU_NATIVE_SO}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        DEPENDS "${ADDER_RES_C_FMU_DIR}/adder-res-c-fmu.c"
+        COMMENT "Building adder-res-c-fmu native shared library (x86_64-linux)..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-res-c-fmu-native
+        DEPENDS "${ADDER_RES_C_FMU_NATIVE_SO}"
+    )
+
+    add_test(
+        NAME adder-res-c-fmu-native-symbols
+        COMMAND /bin/sh -c
+            "nm -D '${ADDER_RES_C_FMU_NATIVE_SO}' | grep -q ' T fmi3InstantiateCoSimulation'"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(adder-res-c-fmu-native-symbols
+        PROPERTIES DEPENDS adder-res-c-fmu-wasm-validation
+    )
+
+    set(ADDER_RES_C_FMU_ARCHIVE  "${CMAKE_BINARY_DIR}/adder-res-c-fmu.fmu")
+    set(ADDER_RES_C_FMU_STAGING  "${CMAKE_BINARY_DIR}/adder-res-c-fmu-staging")
+    set(ADDER_RES_C_FMU_MODEL_DESC "${ADDER_RES_C_FMU_DIR}/modelDescription.xml")
+    set(ADDER_RES_C_FMU_RESOURCES "${ADDER_RES_C_FMU_DIR}/resources")
+
+    add_custom_command(
+        OUTPUT "${ADDER_RES_C_FMU_ARCHIVE}"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_RES_C_FMU_STAGING}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${ADDER_RES_C_FMU_STAGING}/binaries/wasm32-wasip2"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${ADDER_RES_C_FMU_STAGING}/binaries/x86_64-linux"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_RES_C_FMU_MODEL_DESC}"
+                "${ADDER_RES_C_FMU_STAGING}/modelDescription.xml"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_RES_C_FMU_WASM}"
+                "${ADDER_RES_C_FMU_STAGING}/binaries/wasm32-wasip2/adder_res_c_fmu.wasm"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_RES_C_FMU_NATIVE_SO}"
+                "${ADDER_RES_C_FMU_STAGING}/binaries/x86_64-linux/adder_res_c_fmu.so"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${ADDER_RES_C_FMU_RESOURCES}"
+                "${ADDER_RES_C_FMU_STAGING}/resources"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${ADDER_RES_C_FMU_STAGING}"
+                ${CMAKE_COMMAND} -E tar cf "${ADDER_RES_C_FMU_ARCHIVE}" --format=zip
+                -- modelDescription.xml binaries resources
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        DEPENDS
+            adder-res-c-fmu-wasm
+            "${ADDER_RES_C_FMU_NATIVE_SO}"
+            "${ADDER_RES_C_FMU_MODEL_DESC}"
+        COMMENT "Packaging adder-res-c-fmu FMU archive..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-res-c-fmu-archive
+        DEPENDS "${ADDER_RES_C_FMU_ARCHIVE}"
+    )
+
+    if(TARGET adder-fmu-rust-runner-build)
+        add_custom_target(adder-res-c-fmu-rust-runner
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RES_C_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                adder-fmu-rust-runner-build
+                adder-res-c-fmu-archive
+            COMMENT "Running adder-fmu-rust-runner against adder-res-c-fmu.fmu..."
+            VERBATIM
+        )
+
+        add_test(
+            NAME adder-res-c-fmu-rust-runner
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RES_C_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(adder-res-c-fmu-rust-runner
+            PROPERTIES DEPENDS adder-res-c-fmu-wasm-validation
+        )
+    endif()
+
+    if(TARGET adder-fmu-c-runner-build)
+        add_custom_target(adder-res-c-fmu-c-runner
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_RES_C_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                adder-fmu-c-runner-build
+                adder-res-c-fmu-archive
+            COMMENT "Running adder-fmu-c-runner against adder-res-c-fmu.fmu..."
+            VERBATIM
+        )
+
+        add_test(
+            NAME adder-res-c-fmu-c-runner
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_RES_C_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(adder-res-c-fmu-c-runner
+            PROPERTIES DEPENDS adder-res-c-fmu-wasm-validation
+        )
+    endif()
+
+    if(TARGET run-all-examples)
+        add_dependencies(run-all-examples validate-adder-res-c-fmu)
+        if(TARGET adder-res-c-fmu-rust-runner)
+            add_dependencies(run-all-examples adder-res-c-fmu-rust-runner)
+        endif()
+        if(TARGET adder-res-c-fmu-c-runner)
+            add_dependencies(run-all-examples adder-res-c-fmu-c-runner)
+        endif()
+    endif()
+endif()

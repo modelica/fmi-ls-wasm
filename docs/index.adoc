@@ -124,10 +124,15 @@ An FMI-LS-WASM compliant FMU is a standard FMI 3.0 FMU archive (a ZIP file with 
 ├── extra/
 │   └── org.modelica.fmi-ls-wasm/
 │       └── manifest.xml         (layered standard manifest — required)
-└── binaries/
-    └── wasm32-wasip2/
-        └── <modelIdentifier>.wasm   (WebAssembly component — required)
+├── binaries/
+│   └── wasm32-wasip2/
+│       └── <modelIdentifier>.wasm   (WebAssembly component — required)
+└── resources/                   (FMU resource files — optional)
+    └── ...
 ----
+
+The `resources/` directory is optional.
+When present, the importer MUST provide the `resource-dir-callbacks` host interface so that the FMU component can access files within that directory at runtime (see <<design-resource-dir-callbacks>>).
 
 === `modelDescription.xml`
 
@@ -226,6 +231,7 @@ include::../wit/fmi3-callbacks.wit[]
 
 The `callbacks` interface provides the four callbacks used across all FMU types.
 The `intermediate-update-callbacks` interface is separated so that simple Co-Simulation FMUs that do not support early return do not need to implement it.
+The `resource-dir-callbacks` interface provides read-only access to files in the FMU's `resources/` directory; it is an optional import that only FMUs requiring resource files need to declare (see <<design-resource-dir-callbacks>>).
 
 === Common Interface
 
@@ -270,9 +276,9 @@ include::../wit/world.wit[]
 [cols="1,2,2",options="header"]
 |===
 | World | Exports (FMU provides) | Imports (host provides)
-| `model-exchange-fmu` | `common`, `model-exchange` | `callbacks`
-| `co-simulation-fmu` | `common`, `co-simulation` | `callbacks`, `intermediate-update-callbacks` (optional)
-| `scheduled-execution-fmu` | `common`, `scheduled-execution` | `callbacks`
+| `model-exchange-fmu` | `common`, `model-exchange` | `callbacks`, `resource-dir-callbacks` (optional)
+| `co-simulation-fmu` | `common`, `co-simulation` | `callbacks`, `intermediate-update-callbacks` (optional), `resource-dir-callbacks` (optional)
+| `scheduled-execution-fmu` | `common`, `scheduled-execution` | `callbacks`, `resource-dir-callbacks` (optional)
 | `master-algorithm` | `callbacks`, `intermediate-update-callbacks` | `common`, `model-exchange`, `co-simulation`, `scheduled-execution`
 |===
 
@@ -309,6 +315,34 @@ The `fmi3InstanceEnvironment` opaque pointer is dropped entirely; the Component 
 
 The `intermediate-update-callbacks` interface is a separate import so that simple CS FMUs that do not support early return can omit it.
 This is permitted by the WIT world definition for `co-simulation-fmu`, which marks that import without making it mandatory at the component level.
+
+[#design-resource-dir-callbacks]
+=== Resource Access → `resource-dir-callbacks` Interface
+
+FMI 3.0 passes a `resourcePath` string to the instantiate functions so that FMUs can locate their resource files.
+A plain filesystem path string is not viable in the WebAssembly Component Model because the sandbox has no native filesystem access.
+
+Instead, this layered standard replaces `resourcePath` with an optional imported interface `resource-dir-callbacks`:
+
+[source,wit]
+----
+interface resource-dir-callbacks {
+    /// Read the contents of a file at the given path, relative to the FMU's
+    /// resources/ directory.  Returns the raw bytes on success, or an error
+    /// message string on failure.
+    read-file: func(path: string) -> result<list<u8>, string>;
+}
+----
+
+An FMU that requires resource files declares `import resource-dir-callbacks` in its world.
+The host extracts the FMU archive, detects the presence of a `resources/` directory, and provides this interface backed by the extracted directory.
+FMUs that do not need resource files do not import this interface and are unaffected.
+
+This design:
+
+* Keeps the WebAssembly sandbox intact — the FMU never receives a raw filesystem path.
+* Allows hosts to control exactly which files the FMU can read.
+* Follows the same optional-import pattern as `intermediate-update-callbacks`.
 
 === Parallel C Arrays → `list<T>` / `list<tuple<…>>`
 
@@ -391,7 +425,7 @@ An FMU is conformant with this layered standard if it:
 An importer is conformant if it:
 
 . Can load and instantiate WebAssembly components conforming to `wasm32-wasip2` target.
-. Provides all imported interfaces declared in the FMU's world (callbacks, and `intermediate-update-callbacks` when `early-return-allowed = true`).
+. Provides all imported interfaces declared in the FMU's world (callbacks, `intermediate-update-callbacks` when `early-return-allowed = true`, and `resource-dir-callbacks` when the FMU archive contains a `resources/` directory).
 . Honours the FMI 3.0 state machine when calling methods on the instance resource.
 . Drops the instance resource (triggering `fmi3FreeInstance`) when the simulation is complete or aborted.
 
@@ -409,7 +443,7 @@ An importer is conformant if it:
 
 . *Serialise/deserialise split* — If round-tripping large state blobs proves expensive, the two-phase C API (`GetFMUState` + `SerializeFMUState`) can be re-exposed as separate WIT functions without changing the type mapping.
 
-. *WASI imports* — FMUs that need filesystem or clock access will depend on WASI interfaces.
+. *WASI imports* — FMUs that need clock access or additional system interfaces beyond resource files will depend on further WASI interfaces.
   These dependencies are not yet specified by this layered standard and are left to the FMU implementor.
 
 [bibliography]
