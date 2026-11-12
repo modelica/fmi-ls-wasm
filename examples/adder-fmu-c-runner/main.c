@@ -803,6 +803,141 @@ static void cleanup_vals(wasmtime_component_val_t *vals, size_t nvals) {
     }
 }
 
+/* ── resource-dir-callbacks host implementation ──────────────────────────── */
+
+typedef struct {
+    wasmtime_component_func_t get_directories;
+} resource_dir_ctx_t;
+
+static wasmtime_error_t *get_resource_directory_cb(
+    void *data,
+    wasmtime_context_t *ctx,
+    const wasmtime_component_func_type_t *ty,
+    wasmtime_component_val_t *args, size_t nargs,
+    wasmtime_component_val_t *results, size_t nresults)
+{
+    (void)ty; (void)args; (void)nargs; (void)nresults;
+    resource_dir_ctx_t *rctx = data;
+    wasmtime_component_val_t directories;
+    wasmtime_error_t *error = wasmtime_component_func_call(
+        &rctx->get_directories, ctx, NULL, 0, &directories, 1);
+    if (error != NULL) return error;
+
+    wasmtime_component_val_t *payload = calloc(1, sizeof(*payload));
+    if (payload == NULL) {
+        cleanup_vals(&directories, 1);
+        return wasmtime_error_new("Cannot allocate resources descriptor result");
+    }
+    bool found = directories.of.list.size == 1;
+    if (found) {
+        /* Move the owned descriptor out of the sole (descriptor, path) tuple. */
+        wasmtime_component_val_t *descriptor = &directories.of.list.data[0].of.tuple.data[0];
+        *payload = *descriptor;
+        descriptor->kind = WASMTIME_COMPONENT_BOOL;
+        descriptor->of.boolean = false;
+    } else {
+        payload->kind = WASMTIME_COMPONENT_STRING;
+        static const char message[] = "No resources directory available";
+        wasm_name_new(&payload->of.string, sizeof(message) - 1, message);
+    }
+    cleanup_vals(&directories, 1);
+    results[0].kind = WASMTIME_COMPONENT_RESULT;
+    results[0].of.result.is_ok = found;
+    results[0].of.result.val = payload;
+    return NULL;
+}
+
+/* The C API does not expose the WASI resource table. Re-exporting the WASI
+ * preopens function from a tiny component lets us obtain real WASI descriptors,
+ * with the same resource identity as wasi:filesystem/types.
+ */
+static bool register_resource_dir_callbacks(
+    wasmtime_component_linker_t *linker,
+    wasm_engine_t *engine,
+    wasmtime_context_t *ctx)
+{
+    static const char IFACE[] = "fmi:fmi3/resource-dir-callbacks@3.0.0";
+    static const char FUNC[]  = "get-resource-directory";
+    static const char ADAPTER[] =
+        "(component"
+        " (import \"wasi:filesystem/types@0.2.6\" (instance $types"
+        "   (export \"descriptor\" (type (sub resource)))))"
+        " (alias export $types \"descriptor\" (type $descriptor))"
+        " (import \"wasi:filesystem/preopens@0.2.6\" (instance $preopens"
+        "   (alias outer 1 $descriptor (type $descriptor))"
+        "   (export \"descriptor\" (type (eq $descriptor)))"
+        "   (type $entry (tuple (own $descriptor) string))"
+        "   (type $entries (list $entry))"
+        "   (export \"get-directories\" (func (result $entries)))))"
+        " (alias export $preopens \"get-directories\" (func $get))"
+        " (export \"get-directories\" (func $get)))";
+
+    wasm_byte_vec_t bytes;
+    wasmtime_error_t *err = wasmtime_wat2wasm(ADAPTER, sizeof(ADAPTER) - 1, &bytes);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to parse WASI descriptor adapter", err);
+        return false;
+    }
+    wasmtime_component_t *adapter = NULL;
+    err = wasmtime_component_new(engine, (uint8_t *)bytes.data, bytes.size, &adapter);
+    wasm_byte_vec_delete(&bytes);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to compile WASI descriptor adapter", err);
+        return false;
+    }
+    wasmtime_component_instance_t adapter_instance;
+    err = wasmtime_component_linker_instantiate(linker, ctx, adapter, &adapter_instance);
+    wasmtime_component_delete(adapter);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to instantiate WASI descriptor adapter", err);
+        return false;
+    }
+    resource_dir_ctx_t *rctx = calloc(1, sizeof(*rctx));
+    if (rctx == NULL) {
+        fprintf(stderr, "Cannot allocate resources callback context\n");
+        return false;
+    }
+    wasmtime_component_export_index_t *index = wasmtime_component_instance_get_export_index(
+        &adapter_instance, ctx, NULL, "get-directories", strlen("get-directories"));
+    bool found = index != NULL && wasmtime_component_instance_get_func(
+        &adapter_instance, ctx, index, &rctx->get_directories);
+    if (index != NULL) wasmtime_component_export_index_delete(index);
+    if (!found) {
+        fprintf(stderr, "Missing get-directories in WASI descriptor adapter\n");
+        free(rctx);
+        return false;
+    }
+
+    wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(linker);
+    if (root == NULL) {
+        fprintf(stderr, "Failed to get linker root instance\n");
+        free(rctx);
+        return false;
+    }
+
+    wasmtime_component_linker_instance_t *iface_inst = NULL;
+    err = wasmtime_component_linker_instance_add_instance(
+        root, IFACE, strlen(IFACE), &iface_inst);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to add resource-dir-callbacks instance", err);
+        wasmtime_component_linker_instance_delete(root);
+        free(rctx);
+        return false;
+    }
+
+    err = wasmtime_component_linker_instance_add_func(
+        iface_inst, FUNC, strlen(FUNC), get_resource_directory_cb, rctx, free);
+    wasmtime_component_linker_instance_delete(iface_inst);
+    wasmtime_component_linker_instance_delete(root);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to register get-resource-directory callback", err);
+        free(rctx);
+        return false;
+    }
+
+    return true;
+}
+
 static bool parse_do_step_result(const wasmtime_component_val_t *result_val,
                                  double *last_successful_time,
                                  bool *terminate_simulation,
@@ -874,12 +1009,40 @@ int main(int argc, char **argv) {
     char wasm_path[4096];
     char native_path[4096];
     char native_platform[256];
+    char resources_dir[4096];
     fmu_metadata_t metadata;
     memset(&metadata, 0, sizeof(metadata));
+    resources_dir[0] = '\0';
 
     if (!extract_fmu_to_temp(fmu_path, tmp_dir, sizeof(tmp_dir))) {
         fprintf(stderr, "Failed to extract FMU archive: %s\n", fmu_path);
         return 1;
+    }
+
+    /* Check for a resources/ directory in the extracted FMU */
+    {
+        char candidate[4096];
+        snprintf(candidate, sizeof(candidate), "%s/resources", tmp_dir);
+        struct stat st;
+        if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
+            strncpy(resources_dir, candidate, sizeof(resources_dir) - 1);
+            resources_dir[sizeof(resources_dir) - 1] = '\0';
+        }
+    }
+
+    /* If resources/offset.txt is present, read the numeric offset for assertions */
+    double sim_offset = 0.0;
+    bool have_offset = false;
+    if (resources_dir[0] != '\0') {
+        char offset_path[4096];
+        snprintf(offset_path, sizeof(offset_path), "%s/offset.txt", resources_dir);
+        FILE *fp = fopen(offset_path, "r");
+        if (fp != NULL) {
+            fscanf(fp, "%lf", &sim_offset);
+            fclose(fp);
+            printf("FMU has resources/offset.txt with offset = %.17g\n", sim_offset);
+	    have_offset = true;
+        }
     }
 
     if (!parse_model_description(tmp_dir, &metadata)) {
@@ -945,6 +1108,17 @@ int main(int argc, char **argv) {
     wasi_config_inherit_stdout(wasi);
     wasi_config_inherit_stderr(wasi);
     wasi_config_inherit_stdin(wasi);
+    if (resources_dir[0] != '\0' &&
+        !wasi_config_preopen_dir(wasi, resources_dir, "resources",
+                                WASMTIME_WASI_DIR_PERMS_READ,
+                                WASMTIME_WASI_FILE_PERMS_READ)) {
+        fprintf(stderr, "Failed to preopen FMU resources directory\n");
+        wasi_config_delete(wasi);
+        free(wasm_bytes);
+        wasmtime_store_delete(store);
+        wasm_engine_delete(engine);
+        return 1;
+    }
 
     wasmtime_error_t *error = wasmtime_context_set_wasi(ctx, wasi);
     if (error != NULL) {
@@ -971,6 +1145,15 @@ int main(int argc, char **argv) {
     error = wasmtime_component_linker_add_wasip2(linker);
     if (error != NULL) {
         print_wasmtime_error("Failed to add WASIp2 imports", error);
+        wasmtime_component_linker_delete(linker);
+        wasmtime_component_delete(component);
+        wasmtime_store_delete(store);
+        wasm_engine_delete(engine);
+        return 1;
+    }
+
+    /* Register fmi:fmi3/resource-dir-callbacks for FMUs that need resource access */
+    if (!register_resource_dir_callbacks(linker, engine, ctx)) {
         wasmtime_component_linker_delete(linker);
         wasmtime_component_delete(component);
         wasmtime_store_delete(store);
@@ -1032,28 +1215,27 @@ int main(int argc, char **argv) {
     printf("Running adder-fmu from t=0.0 to t=%.1f s in %.1f s steps...\n", n_steps * step_size,
            step_size);
 
-    wasmtime_component_val_t instantiate_args[8];
+    wasmtime_component_val_t instantiate_args[7];
     instantiate_args[0] = make_string_val("adder-1");
     instantiate_args[1] = make_string_val(metadata.instantiation_token);
-    instantiate_args[2] = make_string_val("");
+    instantiate_args[2] = make_bool_val(false);
     instantiate_args[3] = make_bool_val(false);
     instantiate_args[4] = make_bool_val(false);
     instantiate_args[5] = make_bool_val(false);
-    instantiate_args[6] = make_bool_val(false);
-    instantiate_args[7] = make_u32_list_val(NULL, 0);
+    instantiate_args[6] = make_u32_list_val(NULL, 0);
 
     wasmtime_component_val_t instantiate_results[1];
     memset(instantiate_results, 0, sizeof(instantiate_results));
     if (!call_component_func("instantiate-co-simulation", &instantiate_func, ctx,
-                             instantiate_args, 8, instantiate_results, 1)) {
-        cleanup_vals(instantiate_args, 8);
+                             instantiate_args, 7, instantiate_results, 1)) {
+        cleanup_vals(instantiate_args, 7);
         wasmtime_component_linker_delete(linker);
         wasmtime_component_delete(component);
         wasmtime_store_delete(store);
         wasm_engine_delete(engine);
         return 1;
     }
-    cleanup_vals(instantiate_args, 8);
+    cleanup_vals(instantiate_args, 7);
 
     wasmtime_component_resource_any_t *cs_instance = NULL;
     if (instantiate_results[0].kind == WASMTIME_COMPONENT_OPTION &&
@@ -1266,7 +1448,7 @@ int main(int argc, char **argv) {
             }
 
             double expected_time = t + step_size;
-            double expected_sum = input_a + input_b;
+            double expected_sum = input_a + input_b + sim_offset;
             if (fabs(got_time - expected_time) > tolerance || fabs(got_sum - expected_sum) > tolerance) {
                 fprintf(stderr,
                         "value check failed at step %zu: time=%.17g expected=%.17g sum=%.17g expected=%.17g\n",
@@ -1317,7 +1499,7 @@ int main(int argc, char **argv) {
     }
     wasmtime_component_resource_any_delete(cs_instance);
 
-    printf("OK - all %zu steps passed: adder FMU correctly computes sum = input_a + input_b.\n", n_steps);
+    printf("OK - all %zu steps passed: adder FMU correctly computes sum = input_a + input_b%s.\n", n_steps,have_offset?" + offset":"");
 
     wasmtime_component_linker_delete(linker);
     wasmtime_component_delete(component);

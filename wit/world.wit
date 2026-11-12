@@ -11,6 +11,11 @@ world model-exchange-fmu {
   // ── Imports (host provides) ──────────────────────────────────────────────
   import callbacks;
 
+  /// Optional: only required when the FMU declares a resources/ directory
+  /// in its archive.  FMUs that need no external resources must not import
+  /// this interface.
+  import resource-dir-callbacks;
+
   // ── Exports (FMU provides) ───────────────────────────────────────────────
 
   /// Common variable access, lifecycle, and state-save/restore functions.
@@ -34,6 +39,11 @@ world co-simulation-fmu {
   /// early-return-allowed = true.
   import intermediate-update-callbacks;
 
+  /// Optional: only required when the FMU declares a resources/ directory
+  /// in its archive.  FMUs that need no external resources must not import
+  /// this interface.
+  import resource-dir-callbacks;
+
   // ── Exports (FMU provides) ───────────────────────────────────────────────
   export common;
   export co-simulation;
@@ -51,6 +61,11 @@ world scheduled-execution-fmu {
   /// All four callbacks (log-message, clock-update,
   /// lock-preemption, unlock-preemption) are mandatory for SE.
   import callbacks;
+
+  /// Optional: only required when the FMU declares a resources/ directory
+  /// in its archive.  FMUs that need no external resources must not import
+  /// this interface.
+  import resource-dir-callbacks;
 
   // ── Exports (FMU provides) ───────────────────────────────────────────────
   export common;
