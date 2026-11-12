@@ -7,15 +7,15 @@
 	"features": {
 		"ghcr.io/devcontainers/features/rust:1": {},
 		"devwasm.azurecr.io/dev-wasm/dev-wasm-feature/wasmtime-wasi:0": {
-			"version": "33",
-			"wasmtime_version": "v45.0.1",
+			"version": "34",
+			"wasmtime_version": "v46.0.1",
 			"wit_version": "0.57.1",
 			"wasm_tools_version": "1.251.0"
 		},
 		"./features/wasm-rust": {}
 	},
 	"containerEnv": {
-		"WASI_SDK_PATH": "/usr/local/lib/wasi-sdk-33.0-x86_64-linux"
+		"WASI_SDK_PATH": "/usr/local/lib/wasi-sdk-34.0-x86_64-linux"
 	},
 
 	// Use 'mounts' to make the cargo cache persistent in a Docker Volume.

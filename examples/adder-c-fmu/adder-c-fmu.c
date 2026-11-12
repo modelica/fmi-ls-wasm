@@ -10,7 +10,7 @@
  *
  * Two API modes, selected at compile-time via preprocessor:
  *
- *   __wasm__   (defined automatically by the WASI SDK / wasm32-wasip2 toolchain)
+ *   __wasm__   (defined automatically by the WASI SDK / wasm32-wasip3 toolchain)
  *       Uses wit-bindgen-generated C bindings (co_simulation_fmu.h).
  *       Compiled to a WebAssembly component FMU binary.
  *

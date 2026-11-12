@@ -19,7 +19,7 @@
 #include "../fmi-standard/headers/fmi3FunctionTypes.h"
 
 static const char *WORLD_COSIM = "fmi:fmi3/co-simulation@3.0.0";
-static const char *WASM_TARGET_PLATFORM = "wasm32-wasip2";
+static const char *WASM_TARGET_PLATFORM = "wasm32-wasip3";
 
 typedef enum {
     RUN_TARGET_WASM,
@@ -923,6 +923,13 @@ int main(int argc, char **argv) {
     if (target == RUN_TARGET_NATIVE) {
         printf("Loading native FMU binary: '%s'\n", native_path);
         return run_native_fmu(native_path, &metadata) ? 0 : 1;
+    }
+
+    if (target == RUN_TARGET_WASM) {
+        fprintf(stderr,
+                "The C runner does not support WASI Preview 3 components; use "
+                "adder-fmu-rust-runner instead.\n");
+        return 1;
     }
 
     printf("Loading wasm component: '%s'\n", wasm_path);

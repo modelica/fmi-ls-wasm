@@ -118,12 +118,12 @@ add_test(
 # (sum = input_a + input_b), compiled to a Wasm component.
 #
 # Build:   cmake --build <build-dir> --target adder-rust-fmu
-# Output:  examples/adder-rust-fmu/target/wasm32-wasip2/release/adder_rust_fmu.wasm
+# Output:  examples/adder-rust-fmu/target/wasm32-wasip3/release/adder_rust_fmu.wasm
 # ---------------------------------------------------------------------------
 if(CARGO_EXECUTABLE)
     set(ADDER_RUST_FMU_DIR  "${CMAKE_SOURCE_DIR}/examples/adder-rust-fmu")
     set(ADDER_RUST_FMU_WASM
-        "${ADDER_RUST_FMU_DIR}/target/wasm32-wasip2/release/adder_rust_fmu.wasm"
+        "${ADDER_RUST_FMU_DIR}/target/wasm32-wasip3/release/adder_rust_fmu.wasm"
     )
 
     add_custom_command(
@@ -145,7 +145,7 @@ if(CARGO_EXECUTABLE)
 
     # Validate the compiled component against the WIT package.
     add_custom_target(validate-adder-rust-fmu
-        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model,component-model-async
                 "${ADDER_RUST_FMU_WASM}"
         DEPENDS adder-rust-fmu
         COMMENT "Validating adder-rust-fmu Wasm component..."
@@ -154,7 +154,7 @@ if(CARGO_EXECUTABLE)
 
     add_test(
         NAME adder-rust-fmu-wasm-validation
-        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model,component-model-async
                 "${ADDER_RUST_FMU_WASM}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
@@ -167,7 +167,7 @@ if(CARGO_EXECUTABLE)
     #
     # Layout inside the archive:
     #   modelDescription.xml
-    #   binaries/wasm32-wasip2/adder_rust_fmu.wasm
+    #   binaries/wasm32-wasip3/adder_rust_fmu.wasm
     # -----------------------------------------------------------------------
     set(ADDER_RUST_FMU_ARCHIVE  "${CMAKE_BINARY_DIR}/adder-rust-fmu.fmu")
     set(ADDER_RUST_FMU_STAGING  "${CMAKE_BINARY_DIR}/adder-rust-fmu-staging")
@@ -178,14 +178,14 @@ if(CARGO_EXECUTABLE)
         # (Re-)create a clean staging tree
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_RUST_FMU_STAGING}"
         COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${ADDER_RUST_FMU_STAGING}/binaries/wasm32-wasip2"
+                "${ADDER_RUST_FMU_STAGING}/binaries/wasm32-wasip3"
         # Populate the staging tree
         COMMAND ${CMAKE_COMMAND} -E copy
                 "${ADDER_RUST_FMU_MODEL_DESC}"
                 "${ADDER_RUST_FMU_STAGING}/modelDescription.xml"
         COMMAND ${CMAKE_COMMAND} -E copy
                 "${ADDER_RUST_FMU_WASM}"
-                "${ADDER_RUST_FMU_STAGING}/binaries/wasm32-wasip2/adder_rust_fmu.wasm"
+                "${ADDER_RUST_FMU_STAGING}/binaries/wasm32-wasip3/adder_rust_fmu.wasm"
         # Zip the staging tree into <build>/adder-rust-fmu.fmu
         # cmake -E chdir changes directory before running the nested command,
         # so relative paths in the archive match the desired layout.
@@ -263,7 +263,7 @@ if(CARGO_EXECUTABLE)
         set(ADDER_FMU_C_RUNNER_DIR "${CMAKE_SOURCE_DIR}/examples/adder-fmu-c-runner")
         set(ADDER_FMU_C_RUNNER_BUILD_DIR "${CMAKE_BINARY_DIR}/adder-fmu-c-runner-build")
         set(ADDER_FMU_C_RUNNER_BIN "${ADDER_FMU_C_RUNNER_BUILD_DIR}/adder-fmu-c-runner")
-        set(WASMTIME_VERSION "v45.0.1")
+        set(WASMTIME_VERSION "v46.0.1")
         set(WASMTIME_C_API_ARCHIVE_NAME "wasmtime-${WASMTIME_VERSION}-x86_64-linux-c-api.tar.xz")
         set(WASMTIME_C_API_URL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${WASMTIME_C_API_ARCHIVE_NAME}")
         set(WASMTIME_C_API_ARCHIVE "${CMAKE_BINARY_DIR}/third_party/${WASMTIME_C_API_ARCHIVE_NAME}")
@@ -294,20 +294,23 @@ if(CARGO_EXECUTABLE)
             DEPENDS "${ADDER_FMU_C_RUNNER_BIN}"
         )
 
+        # Preserve these historical targets while routing P3 execution through
+        # the Rust runner; Wasmtime's C API has no P3 linker yet.
         add_custom_target(adder-fmu-c-runner
-            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_RUST_FMU_ARCHIVE}"
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RUST_FMU_ARCHIVE}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             DEPENDS
                 adder-fmu-c-runner-build
                 adder-rust-fmu-archive
+                adder-fmu-rust-runner-build
                 "${ADDER_FMU_C_RUNNER_DIR}/main.c"
-            COMMENT "Running adder-fmu-c-runner against adder-rust-fmu.fmu..."
+            COMMENT "Running adder-fmu-rust-runner against adder-rust-fmu.fmu..."
             VERBATIM
         )
 
         add_test(
             NAME adder-fmu-c-runner
-            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_RUST_FMU_ARCHIVE}"
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RUST_FMU_ARCHIVE}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         )
         set_tests_properties(adder-fmu-c-runner
@@ -338,7 +341,7 @@ endif()
 #
 # A Co-Simulation FMU identical in behaviour to adder-rust-fmu but implemented in
 # pure C, using wit-bindgen-generated C bindings compiled via the WASI SDK
-# toolchain (wasm32-wasip2).
+# toolchain (wasm32-wasip3).
 #
 # Build:   cmake --build <build-dir> --target adder-c-fmu
 # Output:  <build-dir>/adder_c_fmu.wasm
@@ -372,7 +375,7 @@ if(WIT_BINDGEN_EXECUTABLE)
     )
 
     # -----------------------------------------------------------------------
-    # Compile the C FMU to a wasm32-wasip2 component
+    # Compile the C FMU to a wasm32-wasip3 component
     # -----------------------------------------------------------------------
     set(ADDER_C_FMU_WASM "${CMAKE_BINARY_DIR}/adder_c_fmu.wasm")
 
@@ -442,7 +445,7 @@ if(WIT_BINDGEN_EXECUTABLE)
 
     # Validate the compiled component against the WIT package.
     add_custom_target(validate-adder-c-fmu
-        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model,component-model-async
                 "${ADDER_C_FMU_WASM}"
         DEPENDS adder-c-fmu-wasm
         COMMENT "Validating adder-c-fmu Wasm component..."
@@ -451,7 +454,7 @@ if(WIT_BINDGEN_EXECUTABLE)
 
     add_test(
         NAME adder-c-fmu-wasm-validation
-        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model,component-model-async
                 "${ADDER_C_FMU_WASM}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
@@ -470,7 +473,7 @@ if(WIT_BINDGEN_EXECUTABLE)
         OUTPUT "${ADDER_C_FMU_ARCHIVE}"
         COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_C_FMU_STAGING}"
         COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2"
+            "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip3"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "${ADDER_C_FMU_STAGING}/binaries/x86_64-linux"
         COMMAND ${CMAKE_COMMAND} -E copy
@@ -478,7 +481,7 @@ if(WIT_BINDGEN_EXECUTABLE)
                 "${ADDER_C_FMU_STAGING}/modelDescription.xml"
         COMMAND ${CMAKE_COMMAND} -E copy
                 "${ADDER_C_FMU_WASM}"
-                "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2/adder_c_fmu.wasm"
+                "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip3/adder_c_fmu.wasm"
         COMMAND ${CMAKE_COMMAND} -E copy
             "${ADDER_C_FMU_NATIVE_SO}"
             "${ADDER_C_FMU_STAGING}/binaries/x86_64-linux/adder_c_fmu.so"
@@ -503,19 +506,20 @@ if(WIT_BINDGEN_EXECUTABLE)
     # -----------------------------------------------------------------------
     if(TARGET adder-fmu-c-runner-build)
         add_custom_target(adder-c-fmu-runner
-            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_C_FMU_ARCHIVE}"
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_C_FMU_ARCHIVE}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             DEPENDS
                 adder-fmu-c-runner-build
+                adder-fmu-rust-runner-build
                 adder-c-fmu-archive
                 "${ADDER_FMU_C_RUNNER_DIR}/main.c"
-            COMMENT "Running adder-fmu-c-runner against adder-c-fmu.fmu..."
+            COMMENT "Running adder-fmu-rust-runner against adder-c-fmu.fmu..."
             VERBATIM
         )
 
         add_test(
             NAME adder-c-fmu-runner
-            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_C_FMU_ARCHIVE}"
+            COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_C_FMU_ARCHIVE}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         )
         set_tests_properties(adder-c-fmu-runner
@@ -565,7 +569,7 @@ add_custom_target(adder-wat-fmu
 )
 
 add_custom_target(validate-adder-wat-fmu
-    COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+    COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model,component-model-async
             "${ADDER_WAT_FMU_WASM}"
     DEPENDS adder-wat-fmu
     COMMENT "Validating adder-wat-fmu Wasm component..."
@@ -574,7 +578,7 @@ add_custom_target(validate-adder-wat-fmu
 
 add_test(
     NAME adder-wat-fmu-wasm-validation
-    COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+    COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model,component-model-async
             "${ADDER_WAT_FMU_WASM}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
@@ -586,13 +590,13 @@ add_custom_command(
     OUTPUT "${ADDER_WAT_FMU_ARCHIVE}"
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_WAT_FMU_STAGING}"
     COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${ADDER_WAT_FMU_STAGING}/binaries/wasm32-wasip2"
+            "${ADDER_WAT_FMU_STAGING}/binaries/wasm32-wasip3"
     COMMAND ${CMAKE_COMMAND} -E copy
             "${ADDER_WAT_FMU_MODEL_DESC}"
             "${ADDER_WAT_FMU_STAGING}/modelDescription.xml"
     COMMAND ${CMAKE_COMMAND} -E copy
             "${ADDER_WAT_FMU_WASM}"
-            "${ADDER_WAT_FMU_STAGING}/binaries/wasm32-wasip2/adder_wat_fmu.wasm"
+            "${ADDER_WAT_FMU_STAGING}/binaries/wasm32-wasip3/adder_wat_fmu.wasm"
     COMMAND ${CMAKE_COMMAND} -E chdir "${ADDER_WAT_FMU_STAGING}"
             ${CMAKE_COMMAND} -E tar cf "${ADDER_WAT_FMU_ARCHIVE}" --format=zip
             -- modelDescription.xml binaries
@@ -631,18 +635,19 @@ endif()
 
 if(TARGET adder-fmu-c-runner-build)
     add_custom_target(adder-wat-fmu-c-runner
-        COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_WAT_FMU_ARCHIVE}"
+        COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_WAT_FMU_ARCHIVE}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         DEPENDS
             adder-fmu-c-runner-build
+            adder-fmu-rust-runner-build
             adder-wat-fmu-archive
-        COMMENT "Running adder-fmu-c-runner against adder-wat-fmu.fmu..."
+        COMMENT "Running adder-fmu-rust-runner against adder-wat-fmu.fmu..."
         VERBATIM
     )
 
     add_test(
         NAME adder-wat-fmu-c-runner
-        COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_WAT_FMU_ARCHIVE}"
+        COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_WAT_FMU_ARCHIVE}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
     set_tests_properties(adder-wat-fmu-c-runner

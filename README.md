@@ -37,17 +37,17 @@ wit/
 └── world.wit                       # Composed worlds for each FMU kind
 examples/
 ├── adder-rust-fmu                  # Rust sample FMU
-├── adder-c-fmu                     # Native C sample FMU, including wasm and native targets
+├── adder-c-fmu                     # C sample FMU, including WASI Preview 3 and native targets
 ├── adder-wat-fmu                   # WAT sample FMU
 ├── adder-fmu-rust-runner           # Rust FMU import demonstration
-├── adder-fmu-c-runner              # Native C FMU import demonstration for both wasm and native targets
+├── adder-fmu-c-runner              # Native C FMU import demonstration (native targets only)
 └── fmi-standard                    # Sub-module for the required FMI 3.0 headers for native targets
 ```
 
 ## Quick validation
 
 ```sh
-# Requires wasm-tools ≥ 1.200
+# Requires wasm-tools ≥ 1.251
 wasm-tools component wit wit/
 ```
 
@@ -67,10 +67,13 @@ cmake --build build --target validate-adder-wat-fmu
 # Package the wat example as an FMU archive
 cmake --build build --target adder-wat-fmu-archive
 
-# Run both host runners against adder-wat-fmu.fmu
+# Run the Rust host runner against adder-wat-fmu.fmu
 cmake --build build --target adder-wat-fmu-rust-runner
-cmake --build build --target adder-wat-fmu-c-runner
 ```
+
+WASI Preview 3 components are hosted by the Rust runner. The Wasmtime C
+embedding API does not yet provide a Preview 3 linker, so the C runner is
+limited to native FMU binaries.
 
 ## Design decisions
 
