@@ -97,14 +97,20 @@ interface intermediate-update-callbacks {
 // This interface replaces the resource-path string argument that was passed
 // to the fmi3Instantiate* C functions: because WASI filesystem access requires
 // a pre-opened directory handle granted by the host (not a bare path string),
-// the host provides file access through this callback rather than a path.
+// the host provides a directory capability through this callback rather than
+// a path.
 interface resource-dir-callbacks {
-  /// Read the contents of a file from the FMU's resources directory.
+  use wasi:filesystem/types@0.2.6.{descriptor};
+
+  /// Obtain a read-only descriptor for the FMU's resources/ directory.
   ///
-  /// `path` is relative to the resources/ directory within the FMU archive
-  /// (e.g., "config.dat" resolves to resources/config.dat).
+  /// Each successful call transfers ownership of a fresh descriptor to the
+  /// FMU. The FMU uses wasi:filesystem operations relative to this descriptor
+  /// and must drop it when no longer needed. Dropping it must not invalidate
+  /// descriptors returned by other calls.
   ///
-  /// Returns the raw file bytes on success, or an error message string if
-  /// the file cannot be opened or read.
-  read-file: func(path: string) -> result<list<u8>, string>;
+  /// The host MUST confine access to resources/ (including when resolving
+  /// parent paths and symbolic links) and MUST NOT grant write permissions.
+  /// Returns an error message if the directory cannot be provided.
+  get-resource-directory: func() -> result<descriptor, string>;
 }

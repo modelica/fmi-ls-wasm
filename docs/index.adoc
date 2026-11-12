@@ -327,16 +327,21 @@ Instead, this layered standard replaces `resourcePath` with an optional imported
 [source,wit]
 ----
 interface resource-dir-callbacks {
-    /// Read the contents of a file at the given path, relative to the FMU's
-    /// resources/ directory.  Returns the raw bytes on success, or an error
-    /// message string on failure.
-    read-file: func(path: string) -> result<list<u8>, string>;
+    use wasi:filesystem/types@0.2.6.{descriptor};
+    get-resource-directory: func() -> result<descriptor, string>;
 }
 ----
 
 An FMU that requires resource files declares `import resource-dir-callbacks` in its world.
 The host extracts the FMU archive, detects the presence of a `resources/` directory, and provides this interface backed by the extracted directory.
 FMUs that do not need resource files do not import this interface and are unaffected.
+
+Each successful call transfers a fresh, owned, read-only WASI filesystem descriptor to the FMU.
+The FMU uses `wasi:filesystem` operations relative to this descriptor and MUST drop it when no longer needed.
+Dropping one descriptor MUST NOT invalidate descriptors returned by other calls.
+The host MUST confine access to `resources/`, including parent-path and symbolic-link resolution, and MUST NOT grant write permissions.
+If the directory cannot be provided, the callback returns an error message.
+The descriptor type is shared with `wasi:filesystem/types@0.2.6`, not an integer file descriptor or a separate FMI resource type.
 
 This design:
 

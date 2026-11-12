@@ -11,7 +11,7 @@
  * At instantiation, `offset` is read from resources/offset.txt:
  *
  *   __wasm__   Uses the resource-dir-callbacks imported interface.
- *              read-file("offset.txt") returns the raw file bytes.
+ *              get-resource-directory() returns a WASI filesystem descriptor.
  *
  *   (else)     Uses the FMI 3.0 `resourcePath` argument together with
  *              fopen to read <resourcePath>/offset.txt from the host
@@ -284,41 +284,59 @@ static bool adder_impl_get_adj_deriv(
 /* ── Resource offset helper ──────────────────────────────────────────────── */
 
 /*
- * Ask the host for the contents of resources/offset.txt via the optional
- * fmi:fmi3/resource-dir-callbacks import, parse the ASCII decimal value
- * and return it.  Returns 0.0 on any error (file not found, parse failure).
+ * Obtain the resources directory capability, then read the offset using WASI.
  */
-static double read_resource_offset(void)
+static bool read_resource_offset(double *offset)
 {
-    co_simulation_fmu_string_t path;
-    path.ptr = (uint8_t *)"offset.txt";
-    path.len = 10; /* strlen("offset.txt") */
-
-    co_simulation_fmu_list_u8_t ok_data;
-    co_simulation_fmu_string_t  err_str;
-    memset(&ok_data,  0, sizeof(ok_data));
-    memset(&err_str,  0, sizeof(err_str));
-
-    if (!fmi_fmi3_resource_dir_callbacks_read_file(&path, &ok_data, &err_str)) {
-        /* err_str is set on failure — free it and return default */
-        co_simulation_fmu_string_free(&err_str);
-        return 0.0;
+    wasi_filesystem_types_own_descriptor_t directory, file;
+    co_simulation_fmu_string_t error = {0};
+    if (!fmi_fmi3_resource_dir_callbacks_get_resource_directory(&directory, &error)) {
+        fprintf(stderr, "Cannot obtain resources directory: %.*s\n",
+                (int)error.len, error.ptr);
+        co_simulation_fmu_string_free(&error);
+        return false;
     }
 
-    /* Parse the bytes as ASCII decimal; null-terminate for sscanf. */
-    double offset = 0.0;
-    if (ok_data.len > 0) {
-        char *buf = (char *)malloc(ok_data.len + 1);
-        if (buf) {
-            memcpy(buf, ok_data.ptr, ok_data.len);
-            buf[ok_data.len] = '\0';
-            sscanf(buf, "%lf", &offset);
-            free(buf);
+    co_simulation_fmu_string_t path = {(uint8_t *)"offset.txt", 10};
+    wasi_filesystem_types_error_code_t code;
+    bool opened = wasi_filesystem_types_method_descriptor_open_at(
+        wasi_filesystem_types_borrow_descriptor(directory), 0, &path, 0,
+        WASI_FILESYSTEM_TYPES_DESCRIPTOR_FLAGS_READ, &file, &code);
+    wasi_filesystem_types_descriptor_drop_own(directory);
+    if (!opened) {
+        fprintf(stderr, "Cannot open offset.txt (WASI error %d)\n", (int)code);
+        return false;
+    }
+
+    char text[128];
+    size_t length = 0;
+    bool ok = false;
+    for (;;) {
+        wasi_filesystem_types_tuple2_list_u8_bool_t data;
+        if (!wasi_filesystem_types_method_descriptor_read(
+                wasi_filesystem_types_borrow_descriptor(file),
+                sizeof(text) - 1 - length, length, &data, &code)) {
+            fprintf(stderr, "Cannot read offset.txt (WASI error %d)\n", (int)code);
+            break;
+        }
+        memcpy(text + length, data.f0.ptr, data.f0.len);
+        length += data.f0.len;
+        bool eof = data.f1;
+        co_simulation_fmu_list_u8_free(&data.f0);
+        if (eof) {
+            text[length] = '\0';
+            char extra;
+            ok = sscanf(text, "%lf %c", offset, &extra) == 1;
+            if (!ok) fprintf(stderr, "Invalid offset.txt\n");
+            break;
+        }
+        if (length == sizeof(text) - 1) {
+            fprintf(stderr, "offset.txt is too large\n");
+            break;
         }
     }
-
-    co_simulation_fmu_list_u8_free(&ok_data);
-    return offset;
+    wasi_filesystem_types_descriptor_drop_own(file);
+    return ok;
 }
 
 /* ── common interface ────────────────────────────────────────────────────── */
@@ -355,7 +373,10 @@ bool exports_fmi_fmi3_co_simulation_static_co_simulation_instance_instantiate_co
     adder_instance_t *inst = (adder_instance_t *)calloc(1, sizeof(adder_instance_t));
     if (!inst) return false;
 
-    inst->offset = read_resource_offset();
+    if (!read_resource_offset(&inst->offset)) {
+        free(inst);
+        return false;
+    }
 
     *ret = exports_fmi_fmi3_co_simulation_co_simulation_instance_new(inst);
     return true;

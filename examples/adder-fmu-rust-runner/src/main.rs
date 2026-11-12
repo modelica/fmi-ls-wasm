@@ -47,9 +47,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tempfile::TempDir;
-use wasmtime::component::{Component, Linker, ResourceAny};
+use wasmtime::component::{Component, Linker, Resource, ResourceAny};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::filesystem::{Descriptor, DirPerms, FilePerms, WasiFilesystemView};
 
 // ---------------------------------------------------------------------------
 // WIT bindings (host side)
@@ -57,6 +58,10 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 wasmtime::component::bindgen!({
     world: "co-simulation-fmu",
     path:  "../../wit",
+    with: {
+        "wasi": wasmtime_wasi::p2::bindings::sync,
+    },
+    require_store_data_send: true,
 });
 
 use fmi::fmi3::types::Status;
@@ -74,7 +79,6 @@ const TARGET_PLATFORM: &str = "wasm32-wasip2";
 struct HostState {
     wasi:          WasiCtx,
     table:         wasmtime::component::ResourceTable,
-    resources_dir: Option<std::path::PathBuf>,
 }
 
 impl WasiView for HostState {
@@ -126,12 +130,14 @@ impl fmi::fmi3::intermediate_update_callbacks::Host for HostState {
 /// Used by FMUs that declare a `resources/` directory in their archive.
 /// Provides read-only access to files within that directory.
 impl fmi::fmi3::resource_dir_callbacks::Host for HostState {
-    fn read_file(&mut self, path: String) -> Result<Vec<u8>, String> {
-        let dir = self.resources_dir.as_ref()
-            .ok_or_else(|| "No resources directory available".to_owned())?;
-        let full_path = dir.join(&path);
-        std::fs::read(&full_path)
-            .map_err(|e| format!("Failed to read '{}': {e}", full_path.display()))
+    fn get_resource_directory(&mut self) -> Result<Resource<Descriptor>, String> {
+        let directories = wasmtime_wasi::p2::bindings::filesystem::preopens::Host::get_directories(
+            &mut self.filesystem(),
+        ).map_err(|e| format!("Failed to obtain resources descriptor: {e}"))?;
+        // This runner grants exactly one preopen, the FMU's resources directory.
+        directories.into_iter().next()
+            .map(|(descriptor, _)| descriptor)
+            .ok_or_else(|| "No resources directory available".to_owned())
     }
 }
 
@@ -312,18 +318,134 @@ fn main() -> Result<()> {
     // ── Linker: WASI P2 + FMI callbacks ───────────────────────────────────
     let mut linker: Linker<HostState> = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-    CoSimulationFmu::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+    fmi::fmi3::types::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+        &mut linker,
+        |s: &mut HostState| s,
+    )?;
+    fmi::fmi3::callbacks::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+        &mut linker,
+        |s: &mut HostState| s,
+    )?;
+    fmi::fmi3::intermediate_update_callbacks::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+        &mut linker,
+        |s: &mut HostState| s,
+    )?;
+    fmi::fmi3::resource_dir_callbacks::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
         &mut linker,
         |s: &mut HostState| s,
     )?;
 
     // ── Store ──────────────────────────────────────────────────────────────
+    let mut wasi = WasiCtxBuilder::new();
+    if let Some(dir) = &resources_dir {
+        wasi.preopened_dir(dir, "resources", DirPerms::READ, FilePerms::READ)
+            .map_err(|e| anyhow!("Failed to open FMU resources directory: {e}"))?;
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use fmi::fmi3::resource_dir_callbacks::Host;
+        use wasmtime_wasi::p2::bindings::sync::filesystem::types::{
+            DescriptorFlags, HostDescriptor, OpenFlags, PathFlags,
+        };
+
+        fn host(resources: Option<&Path>) -> HostState {
+            let mut wasi = WasiCtxBuilder::new();
+            if let Some(dir) = resources {
+                wasi.preopened_dir(dir, "resources", DirPerms::READ, FilePerms::READ).unwrap();
+            }
+            HostState {
+                wasi: wasi.build(),
+                table: wasmtime::component::ResourceTable::new(),
+            }
+        }
+
+        fn open(
+            host: &mut HostState,
+            dir: &Resource<Descriptor>,
+            path: &str,
+            flags: DescriptorFlags,
+        ) -> wasmtime_wasi::p2::FsResult<Resource<Descriptor>> {
+            HostDescriptor::open_at(
+                &mut host.filesystem(), Resource::new_borrow(dir.rep()),
+                PathFlags::SYMLINK_FOLLOW, path.to_owned(), OpenFlags::empty(), flags,
+            )
+        }
+
+        #[test]
+        fn missing_resources_returns_error() {
+            assert!(host(None).get_resource_directory().unwrap_err().contains("No resources"));
+        }
+
+        #[test]
+        fn c_runner_adapter_returns_shared_wasi_descriptors() {
+            let source = include_str!("../../adder-fmu-c-runner/main.c");
+            let adapter = source.split("static const char ADAPTER[] =").nth(1).unwrap()
+                .split(';').next().unwrap()
+                .lines().map(|line| line.trim().trim_matches('"').replace("\\\"", "\""))
+                .collect::<String>();
+            let engine = Engine::default();
+            let component = Component::new(&engine, adapter).unwrap();
+            let mut linker = Linker::new(&engine);
+            wasmtime_wasi::p2::add_to_linker_sync(&mut linker).unwrap();
+            let tmp = TempDir::new().unwrap();
+            let mut store = Store::new(&engine, host(Some(tmp.path())));
+            let instance = linker.instantiate(&mut store, &component).unwrap();
+            let get = instance.get_typed_func::<(), (Vec<(Resource<Descriptor>, String)>,)>(
+                &mut store, "get-directories",
+            ).unwrap();
+            let (directories,) = get.call(&mut store, ()).unwrap();
+            assert_eq!(directories.len(), 1);
+            let (descriptor, path) = directories.into_iter().next().unwrap();
+            assert_eq!(path, "resources");
+            HostDescriptor::drop(&mut store.data_mut().filesystem(), descriptor).unwrap();
+        }
+
+        #[test]
+        fn directory_descriptors_are_independently_owned_and_readable() {
+            let tmp = TempDir::new().unwrap();
+            fs::write(tmp.path().join("offset.txt"), b"1.5\n").unwrap();
+            let mut host = host(Some(tmp.path()));
+            let first = host.get_resource_directory().unwrap();
+            let second = host.get_resource_directory().unwrap();
+            assert_ne!(first.rep(), second.rep());
+            HostDescriptor::drop(&mut host.filesystem(), first).unwrap();
+            let file = open(&mut host, &second, "offset.txt", DescriptorFlags::READ).unwrap();
+            let (bytes, _) = HostDescriptor::read(
+                &mut host.filesystem(), Resource::new_borrow(file.rep()), 4096, 0,
+            ).unwrap();
+            assert_eq!(bytes, b"1.5\n");
+            HostDescriptor::drop(&mut host.filesystem(), file).unwrap();
+            HostDescriptor::drop(&mut host.filesystem(), second).unwrap();
+            assert!(host.table.is_empty());
+        }
+
+        #[test]
+        fn directory_is_read_only_and_confined() {
+            let tmp = TempDir::new().unwrap();
+            let resources = tmp.path().join("resources");
+            fs::create_dir(&resources).unwrap();
+            fs::write(resources.join("offset.txt"), b"1.5\n").unwrap();
+            fs::write(tmp.path().join("outside.txt"), b"not a resource").unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink("../outside.txt", resources.join("escape")).unwrap();
+            let mut host = host(Some(&resources));
+            let dir = host.get_resource_directory().unwrap();
+            assert!(open(&mut host, &dir, "offset.txt", DescriptorFlags::WRITE).is_err());
+            assert!(open(&mut host, &dir, "../outside.txt", DescriptorFlags::READ).is_err());
+            assert!(open(&mut host, &dir, tmp.path().join("outside.txt").to_str().unwrap(),
+                         DescriptorFlags::READ).is_err());
+            #[cfg(unix)]
+            assert!(open(&mut host, &dir, "escape", DescriptorFlags::READ).is_err());
+            HostDescriptor::drop(&mut host.filesystem(), dir).unwrap();
+        }
+    }
     let mut store = Store::new(
         &engine,
         HostState {
-            wasi:          WasiCtxBuilder::new().build(),
+            wasi:          wasi.build(),
             table:         wasmtime::component::ResourceTable::new(),
-            resources_dir,
         },
     );
 

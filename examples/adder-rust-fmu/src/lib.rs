@@ -33,6 +33,7 @@
 wit_bindgen::generate!({
     world: "co-simulation-fmu",
     path:  "../../wit",
+    generate_all,
 });
 
 use std::cell::RefCell;

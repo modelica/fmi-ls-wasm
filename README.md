@@ -123,19 +123,27 @@ imported interface:
 
 ```wit
 interface resource-dir-callbacks {
-    read-file: func(path: string) -> result<list<u8>, string>;
+    use wasi:filesystem/types@0.2.6.{descriptor};
+    get-resource-directory: func() -> result<descriptor, string>;
 }
 ```
 
 An FMU that requires resource files declares `import resource-dir-callbacks`
 in its world.  The host extracts the FMU archive, detects the presence of a
 `resources/` directory, and provides this interface backed by the extracted
-directory.  FMUs that do not need resource files do not import this interface
+directory. Each successful call returns a fresh, owned, read-only WASI descriptor.
+The FMU uses `wasi:filesystem` operations relative to it and drops it when done.
+The host confines access to `resources/`, including parent paths and symlinks,
+and does not grant write permissions. Failure to provide the directory returns
+an error message. FMUs that do not need resource files do not import this interface
 and are unaffected.
 
 This design keeps the WebAssembly sandbox intact, allows hosts to control
 exactly which files the FMU can read, and follows the same optional-import
 pattern as `intermediate-update-callbacks`.
+
+The WASI filesystem, I/O, and clock WIT dependencies in `wit/deps/` are the
+WASI 0.2.6 interfaces bundled with Wasmtime 45.0.1 (Apache-2.0 WITH LLVM-exception).
 
 ### Parallel C arrays → `list<T>` / `list<tuple<…>>`
 

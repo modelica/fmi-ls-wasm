@@ -12,7 +12,8 @@
 //! | 2               | `input_b` | input         | Float64 | Second addend                       |
 //! | 3               | `sum`     | output        | Float64 | sum = input_a + input_b + offset    |
 //!
-//! The offset value is read once via `resource-dir-callbacks.read-file("offset.txt")`.
+//! The offset is read using WASI filesystem operations on the descriptor returned
+//! by `resource-dir-callbacks.get-resource-directory()`.
 //! This demonstrates the `resource-dir-callbacks` interface for FMUs that need
 //! access to files in their `resources/` directory.
 
@@ -24,6 +25,7 @@
 wit_bindgen::generate!({
     world: "co-simulation-fmu",
     path:  "../../wit",
+    generate_all,
 });
 
 use std::cell::RefCell;
@@ -38,6 +40,25 @@ use exports::fmi::fmi3::co_simulation::{
     DiscreteStatesInfo, IntervalFraction, IntervalQualifier, Status, VariableDependency,
 };
 use fmi::fmi3::types::DependencyKind;
+use wasi::filesystem::types::{DescriptorFlags, OpenFlags, PathFlags};
+
+fn read_resource_offset() -> Result<f64, String> {
+    let directory = fmi::fmi3::resource_dir_callbacks::get_resource_directory()?;
+    let file = directory.open_at(
+        PathFlags::empty(), "offset.txt", OpenFlags::empty(), DescriptorFlags::READ,
+    ).map_err(|e| format!("Cannot open offset.txt: {e:?}"))?;
+    let mut bytes = Vec::new();
+    loop {
+        let (chunk, eof) = file.read(4096, bytes.len() as u64)
+            .map_err(|e| format!("Cannot read offset.txt: {e:?}"))?;
+        bytes.extend(chunk);
+        if eof {
+            break;
+        }
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|e| format!("Invalid offset.txt: {e}"))?;
+    text.trim().parse().map_err(|e| format!("Invalid offset.txt: {e}"))
+}
 
 // ---------------------------------------------------------------------------
 // Value-reference assignments
@@ -92,7 +113,7 @@ impl GuestCoSimulationInstance for AdderResCoSimInstance {
     // ── Static factory ───────────────────────────────────────────────────────
 
     fn instantiate_co_simulation(
-        _instance_name:                   String,
+        instance_name:                    String,
         _instantiation_token:             String,
         _visible:                         bool,
         _logging_on:                      bool,
@@ -100,14 +121,14 @@ impl GuestCoSimulationInstance for AdderResCoSimInstance {
         _early_return_allowed:            bool,
         _required_intermediate_variables: Vec<u32>,
     ) -> Option<exports::fmi::fmi3::co_simulation::CoSimulationInstance> {
-        // Read the numeric offset from resources/offset.txt via the
-        // resource-dir-callbacks interface provided by the host.
-        let offset: f64 = match fmi::fmi3::resource_dir_callbacks::read_file("offset.txt") {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                text.trim().parse::<f64>().unwrap_or(0.0)
+        let offset = match read_resource_offset() {
+            Ok(offset) => offset,
+            Err(message) => {
+                fmi::fmi3::callbacks::log_message(
+                    &instance_name, Status::Error, "resources", &message,
+                );
+                return None;
             }
-            Err(_) => 0.0,
         };
 
         let idx = store_alloc();

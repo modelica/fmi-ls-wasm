@@ -806,116 +806,132 @@ static void cleanup_vals(wasmtime_component_val_t *vals, size_t nvals) {
 /* ── resource-dir-callbacks host implementation ──────────────────────────── */
 
 typedef struct {
-    char *resources_dir;  /* strdup'd absolute path, or NULL if not present */
-} read_file_ctx_t;
+    wasmtime_component_func_t get_directories;
+} resource_dir_ctx_t;
 
-static wasmtime_error_t *read_file_cb(
+static wasmtime_error_t *get_resource_directory_cb(
     void *data,
     wasmtime_context_t *ctx,
     const wasmtime_component_func_type_t *ty,
     wasmtime_component_val_t *args, size_t nargs,
     wasmtime_component_val_t *results, size_t nresults)
 {
-    (void)ctx; (void)ty; (void)nresults;
-    read_file_ctx_t *rctx = (read_file_ctx_t *)data;
+    (void)ty; (void)args; (void)nargs; (void)nresults;
+    resource_dir_ctx_t *rctx = data;
+    wasmtime_component_val_t directories;
+    wasmtime_error_t *error = wasmtime_component_func_call(
+        &rctx->get_directories, ctx, NULL, 0, &directories, 1);
+    if (error != NULL) return error;
 
-    /* Build the result payload: result<list<u8>, string> */
     wasmtime_component_val_t *payload = calloc(1, sizeof(*payload));
-
-    if (nargs < 1 || args[0].kind != WASMTIME_COMPONENT_STRING || rctx->resources_dir == NULL) {
-        const char *errmsg = (rctx->resources_dir == NULL)
-            ? "no resources directory available"
-            : "read-file: expected string argument";
-        payload->kind = WASMTIME_COMPONENT_STRING;
-        wasm_name_new(&payload->of.string, strlen(errmsg), errmsg);
-        results[0].kind = WASMTIME_COMPONENT_RESULT;
-        results[0].of.result.is_ok = false;
-        results[0].of.result.val = payload;
-        return NULL;
+    if (payload == NULL) {
+        cleanup_vals(&directories, 1);
+        return wasmtime_error_new("Cannot allocate resources descriptor result");
     }
-
-    const char *rel = args[0].of.string.data;
-    size_t rel_len = args[0].of.string.size;
-    size_t dir_len = strlen(rctx->resources_dir);
-    char *full = malloc(dir_len + 1 + rel_len + 1);
-    memcpy(full, rctx->resources_dir, dir_len);
-    full[dir_len] = '/';
-    memcpy(full + dir_len + 1, rel, rel_len);
-    full[dir_len + 1 + rel_len] = '\0';
-
-    uint8_t *file_data = NULL;
-    size_t file_len = 0;
-    bool ok = read_binary_file(full, &file_data, &file_len);
-    free(full);
-
-    if (ok) {
-        payload->kind = WASMTIME_COMPONENT_LIST;
-        wasmtime_component_val_t *items =
-            calloc(file_len > 0 ? file_len : 1, sizeof(*items));
-        for (size_t i = 0; i < file_len; ++i) {
-            items[i].kind = WASMTIME_COMPONENT_U8;
-            items[i].of.u8 = file_data[i];
-        }
-        wasmtime_component_vallist_new(&payload->of.list, file_len, items);
-        free(items);
-        free(file_data);
-        results[0].kind = WASMTIME_COMPONENT_RESULT;
-        results[0].of.result.is_ok = true;
-        results[0].of.result.val = payload;
+    bool found = directories.of.list.size == 1;
+    if (found) {
+        /* Move the owned descriptor out of the sole (descriptor, path) tuple. */
+        wasmtime_component_val_t *descriptor = &directories.of.list.data[0].of.tuple.data[0];
+        *payload = *descriptor;
+        descriptor->kind = WASMTIME_COMPONENT_BOOL;
+        descriptor->of.boolean = false;
     } else {
-        const char *errmsg = "failed to read file";
         payload->kind = WASMTIME_COMPONENT_STRING;
-        wasm_name_new(&payload->of.string, strlen(errmsg), errmsg);
-        results[0].kind = WASMTIME_COMPONENT_RESULT;
-        results[0].of.result.is_ok = false;
-        results[0].of.result.val = payload;
+        static const char message[] = "No resources directory available";
+        wasm_name_new(&payload->of.string, sizeof(message) - 1, message);
     }
-
+    cleanup_vals(&directories, 1);
+    results[0].kind = WASMTIME_COMPONENT_RESULT;
+    results[0].of.result.is_ok = found;
+    results[0].of.result.val = payload;
     return NULL;
 }
 
-static void read_file_ctx_finalizer(void *data) {
-    read_file_ctx_t *rctx = (read_file_ctx_t *)data;
-    if (rctx) {
-        free(rctx->resources_dir);
-        free(rctx);
-    }
-}
-
-/* Register fmi:fmi3/resource-dir-callbacks@3.0.0 into the linker.
- * resources_dir may be NULL when the FMU has no resources directory; the
- * callback will then always return an error, but the linker entry is still
- * required so that FMUs that import this interface can be instantiated.
+/* The C API does not expose the WASI resource table. Re-exporting the WASI
+ * preopens function from a tiny component lets us obtain real WASI descriptors,
+ * with the same resource identity as wasi:filesystem/types.
  */
 static bool register_resource_dir_callbacks(
     wasmtime_component_linker_t *linker,
-    const char *resources_dir)
+    wasm_engine_t *engine,
+    wasmtime_context_t *ctx)
 {
     static const char IFACE[] = "fmi:fmi3/resource-dir-callbacks@3.0.0";
-    static const char FUNC[]  = "read-file";
+    static const char FUNC[]  = "get-resource-directory";
+    static const char ADAPTER[] =
+        "(component"
+        " (import \"wasi:filesystem/types@0.2.6\" (instance $types"
+        "   (export \"descriptor\" (type (sub resource)))))"
+        " (alias export $types \"descriptor\" (type $descriptor))"
+        " (import \"wasi:filesystem/preopens@0.2.6\" (instance $preopens"
+        "   (alias outer 1 $descriptor (type $descriptor))"
+        "   (export \"descriptor\" (type (eq $descriptor)))"
+        "   (type $entry (tuple (own $descriptor) string))"
+        "   (type $entries (list $entry))"
+        "   (export \"get-directories\" (func (result $entries)))))"
+        " (alias export $preopens \"get-directories\" (func $get))"
+        " (export \"get-directories\" (func $get)))";
+
+    wasm_byte_vec_t bytes;
+    wasmtime_error_t *err = wasmtime_wat2wasm(ADAPTER, sizeof(ADAPTER) - 1, &bytes);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to parse WASI descriptor adapter", err);
+        return false;
+    }
+    wasmtime_component_t *adapter = NULL;
+    err = wasmtime_component_new(engine, (uint8_t *)bytes.data, bytes.size, &adapter);
+    wasm_byte_vec_delete(&bytes);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to compile WASI descriptor adapter", err);
+        return false;
+    }
+    wasmtime_component_instance_t adapter_instance;
+    err = wasmtime_component_linker_instantiate(linker, ctx, adapter, &adapter_instance);
+    wasmtime_component_delete(adapter);
+    if (err != NULL) {
+        print_wasmtime_error("Failed to instantiate WASI descriptor adapter", err);
+        return false;
+    }
+    resource_dir_ctx_t *rctx = calloc(1, sizeof(*rctx));
+    if (rctx == NULL) {
+        fprintf(stderr, "Cannot allocate resources callback context\n");
+        return false;
+    }
+    wasmtime_component_export_index_t *index = wasmtime_component_instance_get_export_index(
+        &adapter_instance, ctx, NULL, "get-directories", strlen("get-directories"));
+    bool found = index != NULL && wasmtime_component_instance_get_func(
+        &adapter_instance, ctx, index, &rctx->get_directories);
+    if (index != NULL) wasmtime_component_export_index_delete(index);
+    if (!found) {
+        fprintf(stderr, "Missing get-directories in WASI descriptor adapter\n");
+        free(rctx);
+        return false;
+    }
 
     wasmtime_component_linker_instance_t *root = wasmtime_component_linker_root(linker);
     if (root == NULL) {
         fprintf(stderr, "Failed to get linker root instance\n");
+        free(rctx);
         return false;
     }
 
     wasmtime_component_linker_instance_t *iface_inst = NULL;
-    wasmtime_error_t *err = wasmtime_component_linker_instance_add_instance(
+    err = wasmtime_component_linker_instance_add_instance(
         root, IFACE, strlen(IFACE), &iface_inst);
     if (err != NULL) {
         print_wasmtime_error("Failed to add resource-dir-callbacks instance", err);
+        wasmtime_component_linker_instance_delete(root);
+        free(rctx);
         return false;
     }
 
-    read_file_ctx_t *rctx = calloc(1, sizeof(*rctx));
-    rctx->resources_dir = resources_dir ? strdup(resources_dir) : NULL;
-
     err = wasmtime_component_linker_instance_add_func(
-        iface_inst, FUNC, strlen(FUNC), read_file_cb, rctx, read_file_ctx_finalizer);
+        iface_inst, FUNC, strlen(FUNC), get_resource_directory_cb, rctx, free);
+    wasmtime_component_linker_instance_delete(iface_inst);
+    wasmtime_component_linker_instance_delete(root);
     if (err != NULL) {
-        print_wasmtime_error("Failed to register read-file callback", err);
-        read_file_ctx_finalizer(rctx);
+        print_wasmtime_error("Failed to register get-resource-directory callback", err);
+        free(rctx);
         return false;
     }
 
@@ -1092,6 +1108,17 @@ int main(int argc, char **argv) {
     wasi_config_inherit_stdout(wasi);
     wasi_config_inherit_stderr(wasi);
     wasi_config_inherit_stdin(wasi);
+    if (resources_dir[0] != '\0' &&
+        !wasi_config_preopen_dir(wasi, resources_dir, "resources",
+                                WASMTIME_WASI_DIR_PERMS_READ,
+                                WASMTIME_WASI_FILE_PERMS_READ)) {
+        fprintf(stderr, "Failed to preopen FMU resources directory\n");
+        wasi_config_delete(wasi);
+        free(wasm_bytes);
+        wasmtime_store_delete(store);
+        wasm_engine_delete(engine);
+        return 1;
+    }
 
     wasmtime_error_t *error = wasmtime_context_set_wasi(ctx, wasi);
     if (error != NULL) {
@@ -1126,7 +1153,7 @@ int main(int argc, char **argv) {
     }
 
     /* Register fmi:fmi3/resource-dir-callbacks for FMUs that need resource access */
-    if (!register_resource_dir_callbacks(linker, resources_dir[0] ? resources_dir : NULL)) {
+    if (!register_resource_dir_callbacks(linker, engine, ctx)) {
         wasmtime_component_linker_delete(linker);
         wasmtime_component_delete(component);
         wasmtime_store_delete(store);
