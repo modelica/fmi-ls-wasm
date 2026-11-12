@@ -57,11 +57,12 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 wasmtime::component::bindgen!({
     world: "co-simulation-fmu",
     path:  "../../wit",
+    exports: { default: async },
 });
 
 use fmi::fmi3::types::Status;
 
-const TARGET_PLATFORM: &str = "wasm32-wasip2";
+const TARGET_PLATFORM: &str = "wasm32-wasip3";
 
 // ---------------------------------------------------------------------------
 // Host state
@@ -69,7 +70,7 @@ const TARGET_PLATFORM: &str = "wasm32-wasip2";
 
 /// Combined state for the wasmtime store.
 ///
-/// Must implement [`WasiView`] (for WASI P2 imports from the Rust std-lib
+/// Must implement [`WasiView`] (for WASI P3 imports from the Rust std-lib
 /// embedded in the component) and the FMI callback host traits.
 struct HostState {
     wasi:  WasiCtx,
@@ -253,7 +254,8 @@ fn find_wasm_in_fmu(fmu_dir: &Path, model_identifier: &str) -> Result<PathBuf> {
 // Runner
 // ---------------------------------------------------------------------------
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let fmu_path = std::env::args()
         .nth(1)
         .context("Usage: adder-fmu-rust-runner <path/to/adder-fmu.fmu>")?;
@@ -276,13 +278,15 @@ fn main() -> Result<()> {
     // ── Engine & component ─────────────────────────────────────────────────
     let mut cfg = Config::new();
     cfg.wasm_component_model(true);
+    cfg.wasm_component_model_async(true);
     let engine = Engine::new(&cfg)?;
 
     let component = Component::from_file(&engine, &wasm_path)
         .map_err(|e| anyhow!("Failed to load component from '{}': {e}", wasm_path.display()))?;
 
-    // ── Linker: WASI P2 + FMI callbacks ───────────────────────────────────
+    // ── Linker: WASI P3, legacy P2 imports, and FMI callbacks ───────────────
     let mut linker: Linker<HostState> = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     CoSimulationFmu::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
         &mut linker,
@@ -299,7 +303,8 @@ fn main() -> Result<()> {
     );
 
     // ── Instantiate the component ──────────────────────────────────────────
-    let world = CoSimulationFmu::instantiate(&mut store, &component, &linker)
+    let world = CoSimulationFmu::instantiate_async(&mut store, &component, &linker)
+        .await
         .map_err(|e| anyhow!("Failed to instantiate the co-simulation FMU component: {e}"))?;
 
     // ── Simulation parameters ──────────────────────────────────────────────
@@ -326,13 +331,15 @@ fn main() -> Result<()> {
             false,      // event mode used
             false,      // early return allowed
             &[],        // required intermediate variables
-        )?
+        )
+        .await?
         .context("FMU instantiation returned None")?;
 
     world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
-        .call_enter_initialization_mode(&mut store, cs, None, 0.0, None)?;
+        .call_enter_initialization_mode(&mut store, cs, None, 0.0, None)
+        .await?;
 
     // Set initial inputs (t = 0): input_a = 0.0, input_b = 2.0
     world
@@ -343,13 +350,15 @@ fn main() -> Result<()> {
             cs,
             &[metadata.vrs.input_a, metadata.vrs.input_b],
             &[0.0, 2.0],
-        )?;
+        )
+        .await?;
 
     // Verify initial time value
     let init_time_result = world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
-        .call_get_float64(&mut store, cs, &[metadata.vrs.time])?;
+        .call_get_float64(&mut store, cs, &[metadata.vrs.time])
+        .await?;
     let init_time = match init_time_result {
         Ok(v) => v[0],
         Err(s) => bail!("get-float64 failed for time at initialization with status {s:?}"),
@@ -362,7 +371,8 @@ fn main() -> Result<()> {
     world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
-        .call_exit_initialization_mode(&mut store, cs)?;
+        .call_exit_initialization_mode(&mut store, cs)
+        .await?;
 
     // ── Co-simulation loop ─────────────────────────────────────────────────
     //
@@ -390,13 +400,15 @@ fn main() -> Result<()> {
                 cs,
                 &[metadata.vrs.input_a, metadata.vrs.input_b],
                 &[input_a, input_b],
-            )?;
+            )
+            .await?;
 
         // -- 2. Advance time by one step -------------------------------------
         let do_step_result = world
             .fmi_fmi3_co_simulation()
             .co_simulation_instance()
-            .call_do_step(&mut store, cs, t, step_size, false)?;
+            .call_do_step(&mut store, cs, t, step_size, false)
+            .await?;
 
         let r = match do_step_result {
             Ok(r)  => r,
@@ -423,7 +435,8 @@ fn main() -> Result<()> {
         let get_result = world
             .fmi_fmi3_co_simulation()
             .co_simulation_instance()
-            .call_get_float64(&mut store, cs, &[metadata.vrs.time, metadata.vrs.sum])?;
+            .call_get_float64(&mut store, cs, &[metadata.vrs.time, metadata.vrs.sum])
+            .await?;
 
         let values = match get_result {
             Ok(v)  => v,
@@ -449,7 +462,8 @@ fn main() -> Result<()> {
     world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
-        .call_terminate(&mut store, cs)?;
+        .call_terminate(&mut store, cs)
+        .await?;
 
     println!(
         "OK — all {n_steps} steps passed: \

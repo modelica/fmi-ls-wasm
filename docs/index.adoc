@@ -125,7 +125,7 @@ An FMI-LS-WASM compliant FMU is a standard FMI 3.0 FMU archive (a ZIP file with 
 │   └── org.modelica.fmi-ls-wasm/
 │       └── manifest.xml         (layered standard manifest — required)
 └── binaries/
-    └── wasm32-wasip2/
+    └── wasm32-wasip3/
         └── <modelIdentifier>.wasm   (WebAssembly component — required)
 ----
 
@@ -151,8 +151,9 @@ The component MUST export all interfaces listed as `export` in its world and MUS
 
 === Platform Directory
 
-The platform directory for wasm-based FMUs is `binaries/wasm32-wasip2/`.
-This follows the WASI Preview 2 target triple (`wasm32-wasip2`) used by the Bytecode Alliance toolchain ecosystem.
+The platform directory for wasm-based FMUs is `binaries/wasm32-wasip3/`.
+This follows the WASI Preview 3 target triple (`wasm32-wasip3`).
+The FMI WIT interfaces remain synchronous; WASI Preview 3's asynchronous imports are handled by the component runtime.
 
 An FMU MAY include both a wasm component and native binaries for other platforms in the same archive.
 Importers are free to prefer either native binaries or the wasm component when a conforming runtime is available.
@@ -380,7 +381,7 @@ For `fmi3GetBinary` / `fmi3SetBinary` dealing with multiple variables the type b
 
 An FMU is conformant with this layered standard if it:
 
-. Provides a WebAssembly component binary at `binaries/wasm32-wasip2/<modelIdentifier>.wasm`.
+. Provides a WebAssembly component binary at `binaries/wasm32-wasip3/<modelIdentifier>.wasm`.
 . The component implements the WIT world corresponding to its FMU type as defined in <<world-definitions>>.
 . Includes a valid `modelDescription.xml` conformant with FMI 3.0.
 . Includes a valid `extra/org.modelica.fmi-ls-wasm/manifest.xml`.
@@ -390,7 +391,7 @@ An FMU is conformant with this layered standard if it:
 
 An importer is conformant if it:
 
-. Can load and instantiate WebAssembly components conforming to `wasm32-wasip2` target.
+. Can load and instantiate WebAssembly components conforming to `wasm32-wasip3` target.
 . Provides all imported interfaces declared in the FMU's world (callbacks, and `intermediate-update-callbacks` when `early-return-allowed = true`).
 . Honours the FMI 3.0 state machine when calling methods on the instance resource.
 . Drops the instance resource (triggering `fmi3FreeInstance`) when the simulation is complete or aborted.
@@ -423,7 +424,7 @@ An importer is conformant if it:
 
 * [[[RFC2119,4]]] Bradner, S.: _Key words for use in RFCs to Indicate Requirement Levels_. RFC 2119, March 1997. https://www.rfc-editor.org/rfc/rfc2119
 
-* [[[WASI-P2,5]]] Bytecode Alliance: _WASI Preview 2_. https://github.com/WebAssembly/WASI/blob/main/preview2/README.md
+* [[[WASI-P3,5]]] Bytecode Alliance: _WASI Preview 3_. https://wasi.dev/releases/wasi-p3
 
 * [[[LICENSE,6]]] 2-Clause BSD License. https://opensource.org/licenses/BSD-2-Clause
 
